@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  apk-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gymsmart_apk_builder
+    environment:
+      - USER_ID=${USER_ID}
+      - GROUP_ID=${GROUP_ID}
+      - GRADLE_USER_HOME=/root/.gradle
+    volumes:
+      # Montar código fuente del host como sólo lectura
+      - .:/app/src-host:ro
+      # Montaje para sacar el APK compilado al host
+      - ./dist:/output
+      # Cachés persistentes en el workspace y variables de entorno
+      - node_modules_cache:/app/workspace/node_modules
+      - gradle_cache:/root/.gradle
+      - android_cache:/app/workspace-android-cache
+      - npm_cache:/root/.npm
+
+volumes:
+  node_modules_cache:
+  gradle_cache:
+  android_cache:
+  npm_cache:
