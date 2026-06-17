@@ -30,6 +30,9 @@ export default function AppTabs() {
           <TabTrigger name="calendar" href="/calendar" asChild>
             <TabButton>Calendario</TabButton>
           </TabTrigger>
+          <TabTrigger name="statistics" href="/statistics" asChild>
+            <TabButton>Estadísticas</TabButton>
+          </TabTrigger>
         </CustomTabList>
       </TabList>
     </Tabs>

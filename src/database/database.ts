@@ -21,6 +21,8 @@ export interface Exercise {
   video_url: string | null;
   initial_state: string | null; // serialized JSON of InitialStateConfig
   created_at?: string;
+  repsDisplay?: string;
+  isAudit?: boolean;
 }
 
 export interface ExerciseGroup {
@@ -36,6 +38,27 @@ export interface MetaGroup {
   name: string;
   created_at?: string;
   groups?: ExerciseGroup[];
+}
+
+export interface ExerciseCompletionAudit {
+  id?: number;
+  exercise_id: number | null;
+  exercise_name: string;
+  set_index: number;
+  repetitions: number;
+  seconds_taken: number | null;
+  routine_id: number;
+  routine_name: string;
+  completed_date: string; // YYYY-MM-DD
+  group_name?: string | null;
+  created_at?: string;
+}
+
+export interface ExerciseStatItem {
+  exercise_id: number | null;
+  exercise_name: string;
+  total_reps: number;
+  times_done: number;
 }
 
 // Database version control and migrations
@@ -108,9 +131,26 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           current_set INTEGER,
           completed_sets TEXT,
           completed_exercises TEXT,
+          set_times TEXT,
           PRIMARY KEY (meta_group_id, scheduled_date),
           FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS exercise_completion_audits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          exercise_id INTEGER,
+          exercise_name TEXT NOT NULL,
+          set_index INTEGER NOT NULL,
+          repetitions INTEGER NOT NULL,
+          seconds_taken INTEGER,
+          routine_id INTEGER,
+          routine_name TEXT NOT NULL,
+          completed_date TEXT NOT NULL,
+          group_name TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);
     `);
 
     // Ensure all columns exist in the exercises table in case it was created in an older code version
@@ -142,6 +182,41 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
       if (!scheduledRoutinesColumns.includes('is_completed')) {
         await db.execAsync('ALTER TABLE scheduled_routines ADD COLUMN is_completed INTEGER DEFAULT 0;');
       }
+    }
+
+    // Ensure set_times column exists in session_progress table
+    const sessionProgressCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(session_progress);");
+    const sessionProgressColumns = sessionProgressCheck.map(c => c.name);
+    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('set_times')) {
+      await db.execAsync('ALTER TABLE session_progress ADD COLUMN set_times TEXT;');
+    }
+
+    // Ensure set_index column exists in exercise_completion_audits table
+    const auditsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(exercise_completion_audits);");
+    const auditsColumns = auditsCheck.map(c => c.name);
+    if (auditsColumns.length > 0 && !auditsColumns.includes('set_index')) {
+      await db.execAsync('DROP TABLE exercise_completion_audits;');
+      await db.execAsync(`
+        CREATE TABLE exercise_completion_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exercise_id INTEGER,
+            exercise_name TEXT NOT NULL,
+            set_index INTEGER NOT NULL,
+            repetitions INTEGER NOT NULL,
+            seconds_taken INTEGER,
+            routine_id INTEGER,
+            routine_name TEXT NOT NULL,
+            completed_date TEXT NOT NULL,
+            group_name TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await db.execAsync('CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);');
+    }
+
+    // Ensure group_name column exists in exercise_completion_audits table
+    if (auditsColumns.length > 0 && !auditsColumns.includes('group_name')) {
+      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN group_name TEXT;');
     }
 
     // Ensure meta_group_items has surrogate id instead of composite primary key
@@ -414,4 +489,63 @@ export async function insertScheduledRoutine(
 
 export async function deleteScheduledRoutine(db: SQLiteDatabase, id: number): Promise<void> {
   await db.runAsync('DELETE FROM scheduled_routines WHERE id = ?', [id]);
+}
+
+// ==========================================
+// EXERCISE COMPLETION AUDIT & STATS OPERATIONS
+// ==========================================
+
+export async function insertExerciseCompletionAudit(
+  db: SQLiteDatabase,
+  audit: Omit<ExerciseCompletionAudit, 'id' | 'created_at'>
+): Promise<number> {
+  const result = await db.runAsync(
+    `INSERT INTO exercise_completion_audits 
+     (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      audit.exercise_id,
+      audit.exercise_name,
+      audit.set_index,
+      audit.repetitions,
+      audit.seconds_taken,
+      audit.routine_id,
+      audit.routine_name,
+      audit.completed_date,
+      audit.group_name ?? null,
+    ]
+  );
+  return result.lastInsertRowId;
+}
+
+export async function getExerciseStatsAllTime(db: SQLiteDatabase): Promise<ExerciseStatItem[]> {
+  return await db.getAllAsync<ExerciseStatItem>(
+    `SELECT 
+       exercise_id,
+       exercise_name,
+       SUM(repetitions) as total_reps,
+       COUNT(DISTINCT completed_date || '-' || routine_id) as times_done
+     FROM exercise_completion_audits
+     GROUP BY exercise_id, exercise_name
+     ORDER BY total_reps DESC`
+  );
+}
+
+export async function getExerciseStatsForRange(
+  db: SQLiteDatabase,
+  startDate: string,
+  endDate: string
+): Promise<ExerciseStatItem[]> {
+  return await db.getAllAsync<ExerciseStatItem>(
+    `SELECT 
+       exercise_id,
+       exercise_name,
+       SUM(repetitions) as total_reps,
+       COUNT(DISTINCT completed_date || '-' || routine_id) as times_done
+     FROM exercise_completion_audits
+     WHERE completed_date BETWEEN ? AND ?
+     GROUP BY exercise_id, exercise_name
+     ORDER BY total_reps DESC`,
+    [startDate, endDate]
+  );
 }

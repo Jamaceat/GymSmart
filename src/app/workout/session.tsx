@@ -26,6 +26,7 @@ import {
   MetaGroup,
   ExerciseGroup,
   Exercise,
+  insertExerciseCompletionAudit,
 } from '@/database/database';
 import { useAlert } from '@/components/ui/alert-provider';
 
@@ -34,6 +35,21 @@ interface SessionExercise {
   exercise: Exercise;
   groupName: string;
   metaGroupItemId: number;
+}
+
+function calculateTotalReps(exercise: Exercise): number {
+  if (exercise.is_constant === 1) {
+    return (exercise.default_sets || 0) * (exercise.default_reps || 0);
+  }
+  if (exercise.series_config) {
+    try {
+      const config = JSON.parse(exercise.series_config) as { set: number; reps: number }[];
+      return config.reduce((sum, item) => sum + (item.reps || 0), 0);
+    } catch (e) {
+      console.error('Failed to parse series config for exercise', exercise.id, e);
+    }
+  }
+  return (exercise.default_sets || 0) * (exercise.default_reps || 0);
 }
 
 export default function WorkoutSessionScreen() {
@@ -61,6 +77,7 @@ export default function WorkoutSessionScreen() {
   const [completedExercises, setCompletedExercises] = useState<Set<string>>(new Set());
   const [completedSets, setCompletedSets] = useState<Set<number>>(new Set()); // 1-based set indices completed for active exercise
   const [currentSet, setCurrentSet] = useState<number>(1);
+  const [setTimes, setSetTimes] = useState<Record<number, number>>({});
 
   // Timer State
   const [activeSeconds, setActiveSeconds] = useState<number>(0);
@@ -85,6 +102,7 @@ export default function WorkoutSessionScreen() {
     currentSet,
     completedSets,
     completedExercises,
+    setTimes,
   });
 
   useEffect(() => {
@@ -96,8 +114,9 @@ export default function WorkoutSessionScreen() {
       currentSet,
       completedSets,
       completedExercises,
+      setTimes,
     };
-  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises]);
+  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes]);
 
   // Flattened active exercise helper
   const activeSessionItem = sessionExercises[activeIndex] || null;
@@ -124,15 +143,18 @@ export default function WorkoutSessionScreen() {
       resting: boolean,
       currSet: number,
       doneSets: Set<number>,
-      doneExs: Set<string>
+      doneExs: Set<string>,
+      timesMap?: Record<number, number>
     ) => {
       try {
         const doneSetsStr = Array.from(doneSets).join(',');
         const doneExsStr = Array.from(doneExs).join(',');
+        const currentTimes = timesMap || stateRef.current.setTimes || {};
+        const setTimesStr = JSON.stringify(currentTimes);
         await db.runAsync(
           `INSERT OR REPLACE INTO session_progress 
-           (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             parseInt(metaGroupId!, 10),
             date,
@@ -143,6 +165,7 @@ export default function WorkoutSessionScreen() {
             currSet,
             doneSetsStr,
             doneExsStr,
+            setTimesStr,
           ]
         );
       } catch (e) {
@@ -204,6 +227,7 @@ export default function WorkoutSessionScreen() {
               current_set: number;
               completed_sets: string | null;
               completed_exercises: string | null;
+              set_times: string | null;
             }>(
               'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
               [mGroupId, date]
@@ -228,6 +252,16 @@ export default function WorkoutSessionScreen() {
                 setCompletedExercises(new Set(exs));
               } else {
                 setCompletedExercises(new Set());
+              }
+
+              if (progress.set_times) {
+                try {
+                  setSetTimes(JSON.parse(progress.set_times));
+                } catch (e) {
+                  setSetTimes({});
+                }
+              } else {
+                setSetTimes({});
               }
             } else {
               setActiveIndex(0);
@@ -259,7 +293,8 @@ export default function WorkoutSessionScreen() {
           s.isResting,
           s.currentSet,
           s.completedSets,
-          s.completedExercises
+          s.completedExercises,
+          s.setTimes
         );
       }
     };
@@ -303,6 +338,7 @@ export default function WorkoutSessionScreen() {
       if (activeExercise) {
         setCurrentSet(1);
         setCompletedSets(new Set());
+        setSetTimes({});
         setResetSet(1);
         const initialReps = parsedSeriesConfig[0]?.reps ?? activeExercise.default_reps ?? 10;
         setResetReps(initialReps);
@@ -325,6 +361,7 @@ export default function WorkoutSessionScreen() {
     // Reset timers & tracking state locally
     setCurrentSet(1);
     setCompletedSets(new Set());
+    setSetTimes({});
     setIsResting(false);
     setIsRunning(false);
     setActiveSeconds(0);
@@ -338,7 +375,8 @@ export default function WorkoutSessionScreen() {
       false, // isResting
       1, // currentSet
       new Set(), // completedSets
-      completedExercises
+      completedExercises,
+      {}
     );
   };
 
@@ -415,6 +453,9 @@ export default function WorkoutSessionScreen() {
       setRestSeconds(0); // Reset rest timer for new rest period
     }
 
+    const nextSetTimes = { ...setTimes, [currentSet]: activeSeconds };
+    setSetTimes(nextSetTimes);
+
     saveProgress(
       activeIndex,
       activeSeconds,
@@ -422,7 +463,8 @@ export default function WorkoutSessionScreen() {
       !isAllCompleted, // isResting
       nextSet,
       nextCompletedSets,
-      completedExercises
+      completedExercises,
+      nextSetTimes
     );
   };
 
@@ -430,10 +472,11 @@ export default function WorkoutSessionScreen() {
   const handleStartNextSet = () => {
     setIsResting(false);
     setIsRunning(true);
+    setActiveSeconds(0);
 
     saveProgress(
       activeIndex,
-      activeSeconds,
+      0,
       restSeconds,
       false, // isResting = false
       currentSet,
@@ -460,10 +503,13 @@ export default function WorkoutSessionScreen() {
     
     // Clear completed sets from the resetSet point onwards
     const nextCompletedSets = new Set(completedSets);
+    const nextSetTimes = { ...setTimes };
     for (let i = resetSet; i <= parsedSeriesConfig.length; i++) {
       nextCompletedSets.delete(i);
+      delete nextSetTimes[i];
     }
     setCompletedSets(nextCompletedSets);
+    setSetTimes(nextSetTimes);
 
     setShowResetOptions(false);
     
@@ -474,7 +520,8 @@ export default function WorkoutSessionScreen() {
       false, // isResting reset
       resetSet,
       nextCompletedSets,
-      completedExercises
+      completedExercises,
+      nextSetTimes
     );
 
     alert('Reiniciado', `Ejercicio reiniciado en la Serie ${resetSet} con ${resetReps} repeticiones.`);
@@ -492,6 +539,61 @@ export default function WorkoutSessionScreen() {
     const nextCompletedExercises = new Set(completedExercises);
     nextCompletedExercises.add(activeSessionItem.uniqueId);
     setCompletedExercises(nextCompletedExercises);
+
+    // Audit completed sets for active exercise
+    const saveActiveExerciseAudit = async () => {
+      try {
+        const auditDate = date || new Date().toISOString().split('T')[0];
+        const routineName = metaGroup?.name || 'Rutina sin nombre';
+        const routineId = parseInt(metaGroupId!, 10);
+        const ex = activeExercise;
+        if (!ex) return;
+
+        // Delete any existing audits for this exercise in this routine on this date to prevent duplicates
+        await db.runAsync(
+          'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ?',
+          [ex.id || null, routineId, auditDate]
+        );
+
+        // Get the series configs to know the reps for each set
+        const seriesReps: Record<number, number> = {};
+        if (ex.is_constant === 1) {
+          for (let i = 1; i <= ex.default_sets; i++) {
+            seriesReps[i] = ex.default_reps;
+          }
+        } else if (ex.series_config) {
+          try {
+            const config = JSON.parse(ex.series_config) as { set: number; reps: number }[];
+            config.forEach(item => {
+              seriesReps[item.set] = item.reps;
+            });
+          } catch (e) {
+            console.error('Failed to parse series config:', e);
+          }
+        }
+
+        // Insert audit for each completed set
+        for (const setNum of completedSets) {
+          const reps = seriesReps[setNum] ?? ex.default_reps ?? 10;
+          const secs = setTimes[setNum] ?? 0;
+          await insertExerciseCompletionAudit(db, {
+            exercise_id: ex.id || null,
+            exercise_name: ex.name,
+            set_index: setNum,
+            repetitions: reps,
+            seconds_taken: secs,
+            routine_id: routineId,
+            routine_name: routineName,
+            completed_date: auditDate,
+            group_name: activeSessionItem.groupName,
+          });
+        }
+      } catch (e) {
+        console.error('Error saving active exercise audit:', e);
+      }
+    };
+
+    saveActiveExerciseAudit();
 
     // Determine next exercise
     const nextUncompletedIndex = sessionExercises.findIndex(
@@ -541,19 +643,25 @@ export default function WorkoutSessionScreen() {
       false, // isResting
       1, // currentSet
       new Set(), // completedSets
-      nextCompletedExercises
+      nextCompletedExercises,
+      {}
     );
   };
 
   // Check off or manually select a set
   const handleToggleSetManual = (setNum: number) => {
     const nextCompletedSets = new Set(completedSets);
+    const nextSetTimes = { ...setTimes };
+
     if (nextCompletedSets.has(setNum)) {
       nextCompletedSets.delete(setNum);
+      delete nextSetTimes[setNum];
     } else {
       nextCompletedSets.add(setNum);
+      nextSetTimes[setNum] = activeSeconds || 0;
     }
     setCompletedSets(nextCompletedSets);
+    setSetTimes(nextSetTimes);
     setCurrentSet(setNum);
 
     const isAllCompleted = nextCompletedSets.size === parsedSeriesConfig.length;
@@ -577,7 +685,8 @@ export default function WorkoutSessionScreen() {
       nextIsResting,
       setNum,
       nextCompletedSets,
-      completedExercises
+      completedExercises,
+      nextSetTimes
     );
   };
 
@@ -896,7 +1005,7 @@ export default function WorkoutSessionScreen() {
 
                           <View style={styles.seriesItemRight}>
                             <ThemedText type="code" themeColor="textSecondary">
-                              {item.reps} reps
+                              {item.reps} reps{setTimes[setNum] !== undefined && ` • ${formatTime(setTimes[setNum])}`}
                             </ThemedText>
                             {isActiveSet && (
                               <View style={styles.activeSetBadge}>

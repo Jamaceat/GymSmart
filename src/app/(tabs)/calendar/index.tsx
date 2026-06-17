@@ -105,19 +105,52 @@ export default function CalendarScreen() {
       const weeklyRoutines = await getScheduledRoutinesForRange(db, startStr, endStr);
       const routinesList = await getMetaGroups(db);
 
-      setScheduledRoutines(weeklyRoutines);
+      // Also fetch completed routines from audits to handle cases where routines were completed but then deleted/unscheduled
+      const auditsRaw = await db.getAllAsync<{ routine_id: number; routine_name: string; completed_date: string }>(
+        `SELECT DISTINCT routine_id, routine_name, completed_date 
+         FROM exercise_completion_audits 
+         WHERE completed_date BETWEEN ? AND ?`,
+        [startStr, endStr]
+      );
+
+      const mergedRoutines = [...weeklyRoutines];
+
+      auditsRaw.forEach(audit => {
+        const exists = mergedRoutines.some(
+          r => r.meta_group_id === audit.routine_id && r.scheduled_date === audit.completed_date
+        );
+        if (!exists) {
+          mergedRoutines.push({
+            id: -audit.routine_id, // unique negative ID for synthesized items
+            meta_group_id: audit.routine_id,
+            meta_group_name: audit.routine_name,
+            scheduled_date: audit.completed_date,
+            is_completed: 1,
+          });
+        }
+      });
+
+      mergedRoutines.sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date));
+
+      setScheduledRoutines(mergedRoutines);
       setAllRoutines(routinesList);
 
       // If there is an expanded routine detail, refresh it as well
       if (expandedRoutineId !== null) {
-        await refreshExpandedRoutineDetails(expandedRoutineId);
+        const currentExpanded = mergedRoutines.find(r => r.id === expandedRoutineId);
+        if (currentExpanded) {
+          await refreshExpandedRoutineDetails(currentExpanded.meta_group_id, currentExpanded.scheduled_date);
+        } else {
+          setExpandedRoutineId(null);
+          setExpandedRoutineDetails(null);
+        }
       }
     } catch (error) {
       console.error('Error loading calendar data:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [db, currentWeekStart]);
+  }, [db, currentWeekStart, expandedRoutineId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -126,19 +159,241 @@ export default function CalendarScreen() {
   );
 
   // Helper to load complete routine metadata with exercise details
-  const refreshExpandedRoutineDetails = async (metaGroupId: number) => {
+  const refreshExpandedRoutineDetails = async (metaGroupId: number, dateStr: string) => {
     try {
+      // 1. Fetch audits for this routine on this date
+      const audits = await db.getAllAsync<{
+        id: number;
+        exercise_id: number | null;
+        exercise_name: string;
+        set_index: number;
+        repetitions: number;
+        seconds_taken: number | null;
+        routine_id: number;
+        routine_name: string;
+        completed_date: string;
+        group_name: string | null;
+      }>(
+        `SELECT * FROM exercise_completion_audits 
+         WHERE routine_id = ? AND completed_date = ? 
+         ORDER BY id ASC`,
+        [metaGroupId, dateStr]
+      );
+
+      // 2. Try to load the live routine template
       const routineData = await getMetaGroupWithGroups(db, metaGroupId);
+      let liveGroups: ExerciseGroup[] = [];
       if (routineData && routineData.groups) {
-        const groupsWithExercises = await Promise.all(
+        liveGroups = await Promise.all(
           routineData.groups.map(async (g) => {
             const fullGroup = await getGroupWithExercises(db, g.id!);
             return fullGroup || g;
           })
         );
-        setExpandedRoutineDetails({ ...routineData, groups: groupsWithExercises });
+      }
+
+      // 3. Resolve group_names if they are null (for backward compatibility / older logs)
+      if (audits.length > 0) {
+        for (const audit of audits) {
+          if (!audit.group_name) {
+            // Try matching with live groups first
+            if (liveGroups.length > 0) {
+              const matchingGroup = liveGroups.find(g => 
+                g.exercises?.some(ex => ex.id === audit.exercise_id || ex.name === audit.exercise_name)
+              );
+              if (matchingGroup) {
+                audit.group_name = matchingGroup.name;
+                continue;
+              }
+            }
+            // Otherwise, query database for this exercise's group
+            if (audit.exercise_id) {
+              const groupRow = await db.getFirstAsync<{ name: string }>(
+                `SELECT eg.name FROM exercise_groups eg
+                 JOIN group_exercises ge ON eg.id = ge.group_id
+                 WHERE ge.exercise_id = ?
+                 LIMIT 1`,
+                [audit.exercise_id]
+              );
+              if (groupRow) {
+                audit.group_name = groupRow.name;
+              }
+            }
+          }
+        }
+      }
+
+      if (liveGroups.length > 0) {
+        // We have a live template! Let's merge live template + audits
+        // Group audits by exercise_id or exercise_name
+        const auditsByExercise: Record<string, typeof audits> = {};
+        audits.forEach(audit => {
+          const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
+          if (!auditsByExercise[exKey]) {
+            auditsByExercise[exKey] = [];
+          }
+          auditsByExercise[exKey].push(audit);
+        });
+
+        // Track which audited exercises we've displayed
+        const displayedAuditKeys = new Set<string>();
+
+        const mergedGroups = liveGroups.map((group) => {
+          const exercises = (group.exercises ?? []).map((ex) => {
+            const exKey = ex.id ? String(ex.id) : ex.name;
+            const exAudits = auditsByExercise[exKey];
+
+            if (exAudits && exAudits.length > 0) {
+              displayedAuditKeys.add(exKey);
+              exAudits.sort((a, b) => a.set_index - b.set_index);
+              const repsList = exAudits.map(a => a.repetitions);
+              const allRepsSame = repsList.every(r => r === repsList[0]);
+              const totalSets = exAudits.length;
+              const repsDisplay = allRepsSame 
+                ? `${totalSets} x ${repsList[0]} reps` 
+                : `${repsList.join('-')} reps`;
+
+              return {
+                ...ex,
+                repsDisplay,
+                isAudit: true
+              };
+            }
+
+            return ex; // return live exercise state as planned
+          });
+
+          return {
+            ...group,
+            exercises
+          };
+        });
+
+        // Include any exercises that were completed historically but have since been removed from the template
+        const extraAudits = audits.filter(audit => {
+          const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
+          return !displayedAuditKeys.has(exKey);
+        });
+
+        if (extraAudits.length > 0) {
+          // Group extra audits by exercise
+          const extraAuditsByExercise: Record<string, typeof audits> = {};
+          extraAudits.forEach(audit => {
+            const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
+            if (!extraAuditsByExercise[exKey]) {
+              extraAuditsByExercise[exKey] = [];
+            }
+            extraAuditsByExercise[exKey].push(audit);
+          });
+
+          // For each extra exercise, append it to its respective group, or create/find group
+          Object.entries(extraAuditsByExercise).forEach(([exKey, exAudits]) => {
+            exAudits.sort((a, b) => a.set_index - b.set_index);
+            const firstAudit = exAudits[0];
+            const repsList = exAudits.map(a => a.repetitions);
+            const allRepsSame = repsList.every(r => r === repsList[0]);
+            const totalSets = exAudits.length;
+            const repsDisplay = allRepsSame 
+              ? `${totalSets} x ${repsList[0]} reps` 
+              : `${repsList.join('-')} reps`;
+
+            const reconstructedEx = {
+              id: firstAudit.exercise_id ?? undefined,
+              name: firstAudit.exercise_name,
+              is_constant: 1,
+              default_sets: totalSets,
+              default_reps: repsList[0],
+              series_config: null,
+              video_url: null,
+              initial_state: null,
+              repsDisplay,
+              isAudit: true
+            };
+
+            const gName = firstAudit.group_name || 'Otros';
+            let targetGroup = mergedGroups.find(g => g.name === gName);
+            if (!targetGroup) {
+              targetGroup = {
+                id: mergedGroups.length + 1000,
+                name: gName,
+                exercises: [],
+                meta_group_item_id: mergedGroups.length + 1000,
+              };
+              mergedGroups.push(targetGroup);
+            }
+            if (targetGroup.exercises) {
+              targetGroup.exercises.push(reconstructedEx);
+            }
+          });
+        }
+
+        setExpandedRoutineDetails({
+          id: routineData?.id,
+          name: routineData?.name || '',
+          created_at: routineData?.created_at,
+          groups: mergedGroups
+        });
       } else {
-        setExpandedRoutineDetails(routineData);
+        // No live template (deleted). Reconstruct purely from audits
+        if (audits.length > 0) {
+          const groupsMap: Record<string, Record<string, typeof audits>> = {};
+
+          audits.forEach(audit => {
+            const gName = audit.group_name || 'Otros';
+            if (!groupsMap[gName]) {
+              groupsMap[gName] = {};
+            }
+            
+            const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
+            if (!groupsMap[gName][exKey]) {
+              groupsMap[gName][exKey] = [];
+            }
+            groupsMap[gName][exKey].push(audit);
+          });
+
+          const reconstructedGroups = Object.entries(groupsMap).map(([groupName, exercisesMap], gIdx) => {
+            const exercises = Object.entries(exercisesMap).map(([exKey, exAudits]) => {
+              exAudits.sort((a, b) => a.set_index - b.set_index);
+              const firstAudit = exAudits[0];
+              const repsList = exAudits.map(a => a.repetitions);
+              const allRepsSame = repsList.every(r => r === repsList[0]);
+              const totalSets = exAudits.length;
+              const repsDisplay = allRepsSame 
+                ? `${totalSets} x ${repsList[0]} reps` 
+                : `${repsList.join('-')} reps`;
+
+              return {
+                id: firstAudit.exercise_id ?? undefined,
+                name: firstAudit.exercise_name,
+                is_constant: 1,
+                default_sets: totalSets,
+                default_reps: repsList[0],
+                series_config: null,
+                video_url: null,
+                initial_state: null,
+                repsDisplay,
+                isAudit: true
+              };
+            });
+
+            return {
+              id: gIdx,
+              name: groupName,
+              exercises,
+              meta_group_item_id: gIdx,
+            };
+          });
+
+          setExpandedRoutineDetails({
+            id: metaGroupId,
+            name: audits[0]?.routine_name || 'Rutina Completada',
+            groups: reconstructedGroups,
+            isAudit: true
+          } as any);
+        } else {
+          // No audits, no live template
+          setExpandedRoutineDetails(null);
+        }
       }
     } catch (error) {
       console.error('Error fetching expanded routine details:', error);
@@ -146,13 +401,13 @@ export default function CalendarScreen() {
   };
 
   // Toggle routine card expansion to show exercises
-  const handleToggleExpandRoutine = async (scheduledId: number, metaGroupId: number) => {
+  const handleToggleExpandRoutine = async (scheduledId: number, metaGroupId: number, dateStr: string) => {
     if (expandedRoutineId === scheduledId) {
       setExpandedRoutineId(null);
       setExpandedRoutineDetails(null);
     } else {
       setExpandedRoutineId(scheduledId);
-      await refreshExpandedRoutineDetails(metaGroupId);
+      await refreshExpandedRoutineDetails(metaGroupId, dateStr);
     }
   };
 
@@ -398,7 +653,7 @@ export default function CalendarScreen() {
                     ]}>
                     {/* Routine Card Header */}
                     <Pressable
-                      onPress={() => handleToggleExpandRoutine(sr.id, sr.meta_group_id)}
+                      onPress={() => handleToggleExpandRoutine(sr.id, sr.meta_group_id, sr.scheduled_date)}
                       style={styles.routineHeader}>
                       <View style={styles.routineHeaderLeft}>
                         <SymbolView
@@ -512,12 +767,23 @@ export default function CalendarScreen() {
                                   {group.exercises && group.exercises.length > 0 ? (
                                     <View style={styles.exerciseList}>
                                       {group.exercises.map((ex) => (
-                                        <View key={ex.id} style={styles.exerciseItem}>
-                                          <ThemedText type="small" style={styles.exerciseName}>
-                                            • {ex.name}
-                                          </ThemedText>
+                                        <View key={ex.id ? `${ex.id}` : ex.name} style={styles.exerciseItem}>
+                                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.one, flex: 1 }}>
+                                            {ex.isAudit && (
+                                              <SymbolView
+                                                name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
+                                                size={14}
+                                                tintColor="#34c759"
+                                              />
+                                            )}
+                                            <ThemedText type="small" style={styles.exerciseName} numberOfLines={1}>
+                                              {ex.isAudit ? ex.name : `• ${ex.name}`}
+                                            </ThemedText>
+                                          </View>
                                           <ThemedText type="small" themeColor="textSecondary">
-                                            {ex.is_constant === 1
+                                            {ex.repsDisplay !== undefined
+                                              ? ex.repsDisplay
+                                              : ex.is_constant === 1
                                               ? `${ex.default_sets} x ${ex.default_reps} reps`
                                               : 'Series variables'}
                                           </ThemedText>
