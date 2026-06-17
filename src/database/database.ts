@@ -28,6 +28,7 @@ export interface ExerciseGroup {
   name: string;
   created_at?: string;
   exercises?: Exercise[];
+  meta_group_item_id?: number;
 }
 
 export interface MetaGroup {
@@ -80,10 +81,10 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
       );
 
       CREATE TABLE IF NOT EXISTS meta_group_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
           meta_group_id INTEGER,
           group_id INTEGER,
           order_index INTEGER NOT NULL,
-          PRIMARY KEY (meta_group_id, group_id),
           FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
           FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
       );
@@ -92,7 +93,22 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           meta_group_id INTEGER NOT NULL,
           scheduled_date TEXT NOT NULL,
+          is_completed INTEGER DEFAULT 0,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS session_progress (
+          meta_group_id INTEGER,
+          scheduled_date TEXT,
+          active_index INTEGER,
+          active_seconds INTEGER,
+          rest_seconds INTEGER,
+          is_resting INTEGER,
+          current_set INTEGER,
+          completed_sets TEXT,
+          completed_exercises TEXT,
+          PRIMARY KEY (meta_group_id, scheduled_date),
           FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
       );
     `);
@@ -116,6 +132,40 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           await db.execAsync(`ALTER TABLE exercises ADD COLUMN ${col.name} ${col.type};`);
         }
       }
+    }
+
+    // Ensure all columns exist in the scheduled_routines table
+    const scheduledRoutinesCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(scheduled_routines);");
+    const scheduledRoutinesColumns = scheduledRoutinesCheck.map(c => c.name);
+
+    if (scheduledRoutinesColumns.length > 0) {
+      if (!scheduledRoutinesColumns.includes('is_completed')) {
+        await db.execAsync('ALTER TABLE scheduled_routines ADD COLUMN is_completed INTEGER DEFAULT 0;');
+      }
+    }
+
+    // Ensure meta_group_items has surrogate id instead of composite primary key
+    const metaGroupItemsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(meta_group_items);");
+    const metaGroupItemsColumns = metaGroupItemsCheck.map(c => c.name);
+
+    if (metaGroupItemsColumns.length > 0 && !metaGroupItemsColumns.includes('id')) {
+      await db.execAsync(`
+        ALTER TABLE meta_group_items RENAME TO meta_group_items_old;
+
+        CREATE TABLE meta_group_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meta_group_id INTEGER,
+            group_id INTEGER,
+            order_index INTEGER NOT NULL,
+            FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO meta_group_items (meta_group_id, group_id, order_index)
+        SELECT meta_group_id, group_id, order_index FROM meta_group_items_old;
+
+        DROP TABLE meta_group_items_old;
+      `);
     }
 
     // Set user_version to 1
@@ -270,7 +320,7 @@ export async function getMetaGroupWithGroups(db: SQLiteDatabase, metaGroupId: nu
   if (!metaGroup) return null;
 
   const groups = await db.getAllAsync<ExerciseGroup>(
-    `SELECT eg.* FROM exercise_groups eg 
+    `SELECT eg.*, mgi.id as meta_group_item_id FROM exercise_groups eg 
      JOIN meta_group_items mgi ON eg.id = mgi.group_id 
      WHERE mgi.meta_group_id = ? 
      ORDER BY mgi.order_index ASC`,
@@ -299,26 +349,24 @@ export async function addGroupToMetaGroup(
   orderIndex: number
 ): Promise<void> {
   await db.runAsync(
-    'INSERT OR REPLACE INTO meta_group_items (meta_group_id, group_id, order_index) VALUES (?, ?, ?)',
+    'INSERT INTO meta_group_items (meta_group_id, group_id, order_index) VALUES (?, ?, ?)',
     [metaGroupId, groupId, orderIndex]
   );
 }
 
 export async function removeGroupFromMetaGroup(
   db: SQLiteDatabase,
-  metaGroupId: number,
-  groupId: number
+  metaGroupItemId: number
 ): Promise<void> {
-  await db.runAsync('DELETE FROM meta_group_items WHERE meta_group_id = ? AND group_id = ?', [metaGroupId, groupId]);
+  await db.runAsync('DELETE FROM meta_group_items WHERE id = ?', [metaGroupItemId]);
 }
 
-export async function updateMetaGroupItemsOrder(db: SQLiteDatabase, metaGroupId: number, groupIds: number[]): Promise<void> {
+export async function updateMetaGroupItemsOrder(db: SQLiteDatabase, metaGroupId: number, metaGroupItemIds: number[]): Promise<void> {
   await db.withTransactionAsync(async () => {
-    await db.runAsync('DELETE FROM meta_group_items WHERE meta_group_id = ?', [metaGroupId]);
-    for (let i = 0; i < groupIds.length; i++) {
+    for (let i = 0; i < metaGroupItemIds.length; i++) {
       await db.runAsync(
-        'INSERT INTO meta_group_items (meta_group_id, group_id, order_index) VALUES (?, ?, ?)',
-        [metaGroupId, groupIds[i], i]
+        'UPDATE meta_group_items SET order_index = ? WHERE id = ? AND meta_group_id = ?',
+        [i, metaGroupItemIds[i], metaGroupId]
       );
     }
   });
@@ -333,6 +381,7 @@ export interface ScheduledRoutine {
   meta_group_id: number;
   meta_group_name: string;
   scheduled_date: string; // YYYY-MM-DD
+  is_completed?: number;
   created_at?: string;
 }
 

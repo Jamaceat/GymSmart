@@ -5,16 +5,16 @@ import {
   ScrollView,
   Pressable,
   Modal,
-  Alert,
   Dimensions,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSQLiteContext } from 'expo-sqlite';
-import { useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 
 import { ConfirmModal } from '@/components/ui/confirm-modal';
+import { useAlert } from '@/components/ui/alert-provider';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -63,6 +63,8 @@ const getSpanishMonthName = (monthIndex: number): string => {
 export default function CalendarScreen() {
   const db = useSQLiteContext();
   const theme = useTheme();
+  const router = useRouter();
+  const { alert } = useAlert();
 
   // Calendar State
   const [currentWeekStart, setCurrentWeekStart] = useState<Date>(() => getMonday(new Date()));
@@ -178,7 +180,7 @@ export default function CalendarScreen() {
       loadData();
     } catch (error) {
       console.error('Error scheduling routine:', error);
-      Alert.alert('Error', 'No se pudo programar la rutina.');
+      alert('Error', 'No se pudo programar la rutina.');
     }
   };
 
@@ -200,7 +202,7 @@ export default function CalendarScreen() {
       loadData();
     } catch (error) {
       console.error('Error deleting scheduled routine:', error);
-      Alert.alert('Error', 'No se pudo quitar la rutina.');
+      alert('Error', 'No se pudo quitar la rutina.');
     } finally {
       setItemToDelete(null);
     }
@@ -295,7 +297,9 @@ export default function CalendarScreen() {
           {daysOfWeek.map((day, index) => {
             const dateStr = formatDateString(day);
             const isSelected = formatDateString(selectedDate) === dateStr;
-            const hasRoutines = scheduledRoutines.some((sr) => sr.scheduled_date === dateStr);
+            const dayRoutines = scheduledRoutines.filter((sr) => sr.scheduled_date === dateStr);
+            const hasRoutines = dayRoutines.length > 0;
+            const allCompleted = hasRoutines && dayRoutines.every((sr) => sr.is_completed === 1);
             const isToday = formatDateString(new Date()) === dateStr;
 
             return (
@@ -310,20 +314,32 @@ export default function CalendarScreen() {
                   styles.dayCard,
                   isSelected
                     ? { backgroundColor: theme.text }
+                    : allCompleted
+                    ? { backgroundColor: theme.background === '#ffffff' ? '#eaf7ec' : '#142b1a' }
                     : { backgroundColor: theme.backgroundElement },
                   isToday && !isSelected && styles.todayCardOutline,
+                  allCompleted && !isSelected && {
+                    borderColor: theme.background === '#ffffff' ? '#a3e2ab' : '#1b5e20',
+                    borderWidth: 1.2,
+                  },
                   pressed && styles.pressed,
                 ]}>
                 <ThemedText
                   type="small"
                   themeColor={isSelected ? 'background' : 'textSecondary'}
-                  style={styles.dayLabel}>
+                  style={[
+                    styles.dayLabel,
+                    allCompleted && !isSelected && { color: theme.background === '#ffffff' ? '#1e4620' : '#a3e2ab' }
+                  ]}>
                   {dayLabels[index]}
                 </ThemedText>
                 <ThemedText
                   type="smallBold"
                   themeColor={isSelected ? 'background' : 'text'}
-                  style={styles.dayNumber}>
+                  style={[
+                    styles.dayNumber,
+                    allCompleted && !isSelected && { color: theme.background === '#ffffff' ? '#1e4620' : '#a3e2ab' }
+                  ]}>
                   {day.getDate()}
                 </ThemedText>
                 {/* Dot indicator if day has routine scheduled */}
@@ -332,7 +348,13 @@ export default function CalendarScreen() {
                     <View
                       style={[
                         styles.indicatorDot,
-                        { backgroundColor: isSelected ? theme.background : '#3c87f7' },
+                        { 
+                          backgroundColor: isSelected 
+                            ? theme.background 
+                            : allCompleted 
+                            ? '#34c759' 
+                            : '#3c87f7' 
+                        },
                       ]}
                     />
                   )}
@@ -361,8 +383,19 @@ export default function CalendarScreen() {
             <View style={styles.routineList}>
               {routinesForSelectedDay.map((sr) => {
                 const isExpanded = expandedRoutineId === sr.id;
+                const isCompleted = sr.is_completed === 1;
                 return (
-                  <ThemedView key={sr.id} type="backgroundElement" style={styles.routineCard}>
+                  <ThemedView 
+                    key={sr.id} 
+                    type="backgroundElement" 
+                    style={[
+                      styles.routineCard,
+                      isCompleted && {
+                        backgroundColor: theme.background === '#ffffff' ? '#eaf7ec' : '#142b1a',
+                        borderColor: theme.background === '#ffffff' ? '#a3e2ab' : '#1b5e20',
+                        borderWidth: 1.2,
+                      }
+                    ]}>
                     {/* Routine Card Header */}
                     <Pressable
                       onPress={() => handleToggleExpandRoutine(sr.id, sr.meta_group_id)}
@@ -375,61 +408,159 @@ export default function CalendarScreen() {
                             web: isExpanded ? 'expand_more' : 'chevron_right',
                           }}
                           size={18}
-                          tintColor={theme.text}
+                          tintColor={isCompleted ? '#34c759' : theme.text}
                         />
-                        <ThemedText type="smallBold" style={styles.routineName}>
+                        <ThemedText 
+                          type="smallBold" 
+                          style={[
+                            styles.routineName,
+                            isCompleted && { color: theme.background === '#ffffff' ? '#1e4620' : '#a3e2ab' }
+                          ]}>
                           {sr.meta_group_name}
                         </ThemedText>
+                        {isCompleted && (
+                          <View style={styles.completedBadge}>
+                            <SymbolView
+                              name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
+                              size={12}
+                              tintColor="#34c759"
+                            />
+                            <ThemedText type="code" style={styles.completedText}>
+                              Completada
+                            </ThemedText>
+                          </View>
+                        )}
                       </View>
-                      <Pressable
-                        onPress={() => handleUnscheduleRoutine(sr.id, sr.meta_group_name)}
-                        style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed]}>
-                        <SymbolView
-                          name={{ ios: 'trash', android: 'delete', web: 'delete' }}
-                          size={18}
-                          tintColor="#ff453a"
-                        />
-                      </Pressable>
+                      <View style={styles.routineHeaderRight}>
+                        <Pressable
+                          onPress={() => {
+                            router.push({
+                              pathname: '/workout/session' as any,
+                              params: { metaGroupId: sr.meta_group_id, date: selectedDateStr }
+                            });
+                          }}
+                          style={({ pressed }) => [styles.playBtn, pressed && styles.pressed]}
+                          accessibilityLabel="Comenzar rutina">
+                          <SymbolView
+                            name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
+                            size={20}
+                            tintColor={isCompleted ? '#34c759' : '#3c87f7'}
+                          />
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleUnscheduleRoutine(sr.id, sr.meta_group_name)}
+                          style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed]}
+                          accessibilityLabel="Quitar rutina">
+                          <SymbolView
+                            name={{ ios: 'trash', android: 'delete', web: 'delete' }}
+                            size={18}
+                            tintColor="#ff453a"
+                          />
+                        </Pressable>
+                      </View>
                     </Pressable>
 
                     {/* Expanded Content (Groups and Exercises) */}
-                    {isExpanded && expandedRoutineDetails && (
-                      <View style={styles.routineDetailsContainer}>
-                        {expandedRoutineDetails.groups && expandedRoutineDetails.groups.length > 0 ? (
-                          expandedRoutineDetails.groups.map((group: ExerciseGroup) => (
-                            <View key={group.id} style={styles.groupDetailBlock}>
-                              <ThemedText type="smallBold" style={styles.groupTitle} themeColor="textSecondary">
-                                {group.name}
-                              </ThemedText>
-                              {group.exercises && group.exercises.length > 0 ? (
-                                <View style={styles.exerciseList}>
-                                  {group.exercises.map((ex) => (
-                                    <View key={ex.id} style={styles.exerciseItem}>
-                                      <ThemedText type="small" style={styles.exerciseName}>
-                                        • {ex.name}
-                                      </ThemedText>
-                                      <ThemedText type="small" themeColor="textSecondary">
-                                        {ex.is_constant === 1
-                                          ? `${ex.default_sets} x ${ex.default_reps} reps`
-                                          : 'Series variables'}
-                                      </ThemedText>
+                    {isExpanded && expandedRoutineDetails && (() => {
+                      const groupOccurrenceCounts: Record<number, number> = {};
+                      const groupsWithOccurrence = (expandedRoutineDetails.groups ?? []).map(group => {
+                        const gId = group.id!;
+                        groupOccurrenceCounts[gId] = (groupOccurrenceCounts[gId] ?? 0) + 1;
+                        return {
+                          ...group,
+                          occurrenceIndex: groupOccurrenceCounts[gId],
+                        };
+                      });
+
+                      const getGroupBackgroundColor = (occurrenceIndex: number) => {
+                        if (occurrenceIndex === 1) {
+                          return theme.background;
+                        }
+                        return theme.background === '#ffffff' 
+                          ? '#e6f0fa' 
+                          : '#1a2636';
+                      };
+
+                      return (
+                        <View style={styles.routineDetailsContainer}>
+                          {groupsWithOccurrence.length > 0 ? (
+                            <>
+                              {groupsWithOccurrence.map((group, idx) => (
+                                <View 
+                                  key={group.meta_group_item_id ?? idx} 
+                                  style={[
+                                    styles.groupDetailBlock,
+                                    {
+                                      backgroundColor: getGroupBackgroundColor(group.occurrenceIndex),
+                                      padding: Spacing.two,
+                                      borderRadius: Spacing.two,
+                                      marginBottom: Spacing.two,
+                                    }
+                                  ]}>
+                                  <View style={styles.groupHeaderRow}>
+                                    <ThemedText type="smallBold" style={styles.groupTitle} themeColor="textSecondary">
+                                      {group.name}
+                                    </ThemedText>
+                                    {group.occurrenceIndex > 1 && (
+                                      <View style={[styles.repeatBadge, { backgroundColor: theme.background === '#ffffff' ? '#3c87f7' : '#2260c0' }]}>
+                                        <ThemedText type="smallBold" style={styles.repeatBadgeText}>
+                                          {group.occurrenceIndex}x
+                                        </ThemedText>
+                                      </View>
+                                    )}
+                                  </View>
+                                  {group.exercises && group.exercises.length > 0 ? (
+                                    <View style={styles.exerciseList}>
+                                      {group.exercises.map((ex) => (
+                                        <View key={ex.id} style={styles.exerciseItem}>
+                                          <ThemedText type="small" style={styles.exerciseName}>
+                                            • {ex.name}
+                                          </ThemedText>
+                                          <ThemedText type="small" themeColor="textSecondary">
+                                            {ex.is_constant === 1
+                                              ? `${ex.default_sets} x ${ex.default_reps} reps`
+                                              : 'Series variables'}
+                                          </ThemedText>
+                                        </View>
+                                      ))}
                                     </View>
-                                  ))}
+                                  ) : (
+                                    <ThemedText type="small" themeColor="textSecondary" style={styles.noExercises}>
+                                      Sin ejercicios añadidos
+                                    </ThemedText>
+                                  )}
                                 </View>
-                              ) : (
-                                <ThemedText type="small" themeColor="textSecondary" style={styles.noExercises}>
-                                  Sin ejercicios añadidos
+                              ))}
+
+                              <Pressable
+                                onPress={() => {
+                                  router.push({
+                                    pathname: '/workout/session' as any,
+                                    params: { metaGroupId: sr.meta_group_id, date: selectedDateStr }
+                                  });
+                                }}
+                                style={({ pressed }) => [
+                                  styles.startRoutineButton,
+                                  pressed && styles.pressed,
+                                ]}>
+                                <SymbolView
+                                  name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
+                                  size={18}
+                                  tintColor="#ffffff"
+                                />
+                                <ThemedText type="smallBold" style={styles.startRoutineButtonText}>
+                                  Comenzar Entrenamiento
                                 </ThemedText>
-                              )}
-                            </View>
-                          ))
-                        ) : (
-                          <ThemedText type="small" themeColor="textSecondary" style={styles.noExercises}>
-                            No hay grupos ni ejercicios añadidos a esta rutina.
-                          </ThemedText>
-                        )}
-                      </View>
-                    )}
+                              </Pressable>
+                            </>
+                          ) : (
+                            <ThemedText type="small" themeColor="textSecondary" style={styles.noExercises}>
+                              No hay grupos ni ejercicios añadidos a esta rutina.
+                            </ThemedText>
+                          )}
+                        </View>
+                      );
+                    })()}
                   </ThemedView>
                 );
               })}
@@ -653,6 +784,27 @@ const styles = StyleSheet.create({
   deleteBtn: {
     padding: Spacing.half,
   },
+  routineHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  playBtn: {
+    padding: Spacing.half,
+  },
+  startRoutineButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two + Spacing.half,
+    borderRadius: Spacing.three,
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+    backgroundColor: '#3c87f7',
+  },
+  startRoutineButtonText: {
+    color: '#ffffff',
+  },
   routineDetailsContainer: {
     paddingHorizontal: Spacing.four,
     paddingBottom: Spacing.three,
@@ -748,5 +900,38 @@ const styles = StyleSheet.create({
   },
   bottomSpacer: {
     height: Spacing.four,
+  },
+  groupHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+    marginBottom: Spacing.one,
+  },
+  repeatBadge: {
+    paddingHorizontal: Spacing.one + Spacing.half,
+    paddingVertical: Spacing.half,
+    borderRadius: Spacing.one,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  repeatBadgeText: {
+    fontSize: 10,
+    color: '#ffffff',
+    fontWeight: 'bold',
+  },
+  completedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.half,
+    backgroundColor: 'rgba(52, 199, 89, 0.12)',
+    paddingHorizontal: Spacing.one + Spacing.half,
+    paddingVertical: Spacing.half,
+    borderRadius: 99,
+    marginLeft: Spacing.two,
+  },
+  completedText: {
+    color: '#34c759',
+    fontWeight: 'bold',
+    fontSize: 10,
   },
 });

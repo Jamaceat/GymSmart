@@ -4,7 +4,6 @@ import {
   FlatList,
   Pressable,
   TextInput,
-  Alert,
   Platform,
   View,
 } from 'react-native';
@@ -14,16 +13,18 @@ import { SymbolView } from 'expo-symbols';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Colors, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getExercises, deleteExercise, Exercise } from '@/database/database';
 import { openExerciseVideo } from '@/utils/linking';
 import { ConfirmModal } from '@/components/ui/confirm-modal';
+import { useAlert } from '@/components/ui/alert-provider';
 
 export function ExercisesView() {
   const db = useSQLiteContext();
   const router = useRouter();
   const theme = useTheme();
+  const { alert } = useAlert();
 
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -41,7 +42,7 @@ export function ExercisesView() {
       setExercises(data);
     } catch (error) {
       console.error('Error loading exercises:', error);
-      Alert.alert('Error', `No se pudieron cargar los ejercicios: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudieron cargar los ejercicios: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsLoading(false);
     }
@@ -68,7 +69,7 @@ export function ExercisesView() {
       loadExercises();
     } catch (error) {
       console.error('Error deleting exercise:', error);
-      Alert.alert('Error', `No se pudo eliminar el ejercicio: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo eliminar el ejercicio: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setItemToDelete(null);
     }

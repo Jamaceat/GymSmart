@@ -4,22 +4,23 @@ import {
   FlatList,
   Pressable,
   TextInput,
-  Alert,
   Modal,
   View,
   ScrollView,
-  Platform,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
 import { SymbolView } from 'expo-symbols';
+import { GestureDetector } from 'react-native-gesture-handler';
 
 import { ConfirmModal } from '@/components/ui/confirm-modal';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Colors, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { SortableList } from '@/components/ui/sortable-list';
+import { useAlert } from '@/components/ui/alert-provider';
 import {
   getMetaGroups,
   getMetaGroupWithGroups,
@@ -37,6 +38,7 @@ import {
 export function MetaGroupsView() {
   const db = useSQLiteContext();
   const theme = useTheme();
+  const { alert } = useAlert();
 
   // State
   const [metaGroups, setMetaGroups] = useState<MetaGroup[]>([]);
@@ -64,6 +66,7 @@ export function MetaGroupsView() {
     metaGroupId?: number;
     metaGroupName?: string;
     groupId?: number;
+    metaGroupItemId?: number;
     groupName?: string;
   }>({
     visible: false,
@@ -88,7 +91,7 @@ export function MetaGroupsView() {
       }
     } catch (error) {
       console.error('Error loading meta-groups:', error);
-      Alert.alert('Error', `No se pudieron cargar las rutinas: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudieron cargar las rutinas: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsLoading(false);
     }
@@ -119,7 +122,7 @@ export function MetaGroupsView() {
   // Create / Edit MetaGroup Save
   const handleSaveMetaGroup = async () => {
     if (!metaGroupNameInput.trim()) {
-      Alert.alert('Validación', 'El nombre de la rutina es requerido.');
+      alert('Validación', 'El nombre de la rutina es requerido.');
       return;
     }
 
@@ -134,7 +137,7 @@ export function MetaGroupsView() {
       loadData();
     } catch (error) {
       console.error('Error saving meta-group:', error);
-      Alert.alert('Error', `No se pudo guardar la rutina: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo guardar la rutina: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -163,25 +166,25 @@ export function MetaGroupsView() {
       setExpandedMetaGroupDetails(details);
     } catch (error) {
       console.error('Error adding group to routine:', error);
-      Alert.alert('Error', `No se pudo añadir el grupo: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo añadir el grupo: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
   // Remove group from currently expanded routine
-  const handleRemoveGroupFromMetaGroup = (groupId: number, groupName: string) => {
+  const handleRemoveGroupFromMetaGroup = (metaGroupItemId: number, groupName: string) => {
     if (!expandedMetaGroupId) return;
     setConfirmConfig({
       visible: true,
       title: 'Quitar Grupo',
       message: `¿Estás seguro de que deseas quitar el grupo "${groupName}" de esta rutina?`,
       actionType: 'removeGroup',
-      groupId,
+      metaGroupItemId,
       groupName,
     });
   };
 
   const handleConfirmAction = async () => {
-    const { actionType, metaGroupId, groupId } = confirmConfig;
+    const { actionType, metaGroupId, metaGroupItemId } = confirmConfig;
     setConfirmConfig((prev) => ({ ...prev, visible: false }));
 
     if (actionType === 'deleteMetaGroup' && metaGroupId !== undefined) {
@@ -194,52 +197,41 @@ export function MetaGroupsView() {
         loadData();
       } catch (error) {
         console.error('Error deleting meta-group:', error);
-        Alert.alert('Error', `No se pudo eliminar la rutina: ${error instanceof Error ? error.message : String(error)}`);
+        alert('Error', `No se pudo eliminar la rutina: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else if (actionType === 'removeGroup' && groupId !== undefined && expandedMetaGroupId) {
+    } else if (actionType === 'removeGroup' && metaGroupItemId !== undefined && expandedMetaGroupId) {
       try {
-        await removeGroupFromMetaGroup(db, expandedMetaGroupId, groupId);
+        await removeGroupFromMetaGroup(db, metaGroupItemId);
         
         // Refresh details
         const details = await getMetaGroupWithGroups(db, expandedMetaGroupId);
         setExpandedMetaGroupDetails(details);
       } catch (error) {
         console.error('Error removing group from routine:', error);
-        Alert.alert('Error', `No se pudo remover el grupo: ${error instanceof Error ? error.message : String(error)}`);
+        alert('Error', `No se pudo remover el grupo: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   };
 
   // Reorder groups inside routine
-  const moveGroupInMetaGroup = async (index: number, direction: 'up' | 'down') => {
-    if (!expandedMetaGroupDetails?.groups || !expandedMetaGroupId) return;
-
-    const newList = [...expandedMetaGroupDetails.groups];
-    const targetIndex = direction === 'up' ? index - 1 : index + 1;
-
-    if (targetIndex < 0 || targetIndex >= newList.length) return;
-
-    // Swap items
-    const temp = newList[index];
-    newList[index] = newList[targetIndex];
-    newList[targetIndex] = temp;
+  const handleGroupsOrderChange = async (newOrderedGroups: ExerciseGroup[]) => {
+    if (!expandedMetaGroupId) return;
 
     try {
-      const ids = newList.map((g) => g.id!).filter(Boolean);
+      const ids = newOrderedGroups.map((g) => g.meta_group_item_id!).filter(Boolean);
       await updateMetaGroupItemsOrder(db, expandedMetaGroupId, ids);
       
-      // Refresh local list
-      setExpandedMetaGroupDetails({ ...expandedMetaGroupDetails, groups: newList });
+      // Refresh details from database to get correct meta_group_item_id values
+      const details = await getMetaGroupWithGroups(db, expandedMetaGroupId);
+      setExpandedMetaGroupDetails(details);
     } catch (error) {
       console.error('Error reordering groups:', error);
-      Alert.alert('Error', `No se pudo reordenar: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo reordenar: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
-  // Filter groups available to add (not in current routine)
-  const availableGroups = allGroups.filter(
-    (g) => !expandedMetaGroupDetails?.groups?.some((curr) => curr.id === g.id)
-  );
+  // All groups are available to be added multiple times
+  const availableGroups = allGroups;
 
   const renderMetaGroupItem = ({ item }: { item: MetaGroup }) => {
     const isExpanded = expandedMetaGroupId === item.id;
@@ -290,75 +282,101 @@ export function MetaGroupsView() {
           </View>
         </Pressable>
 
-        {isExpanded && expandedMetaGroupDetails && (
-          <View style={styles.expandedContent}>
-            {expandedMetaGroupDetails.groups && expandedMetaGroupDetails.groups.length > 0 ? (
-              <View style={styles.groupList}>
-                {expandedMetaGroupDetails.groups.map((g, idx) => (
-                  <View key={g.id} style={styles.groupItem}>
-                    <View style={styles.groupInfo}>
-                      <ThemedText type="smallBold">{g.name}</ThemedText>
-                    </View>
-                    <View style={styles.groupActions}>
-                      <Pressable
-                        onPress={() => moveGroupInMetaGroup(idx, 'up')}
-                        disabled={idx === 0}
-                        style={({ pressed }) => [
-                          styles.reorderButton,
-                          idx === 0 && styles.disabled,
-                          pressed && styles.pressed,
-                        ]}>
-                        <SymbolView
-                          name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }}
-                          size={16}
-                          tintColor={theme.text}
-                        />
-                      </Pressable>
-                      <Pressable
-                        onPress={() => moveGroupInMetaGroup(idx, 'down')}
-                        disabled={idx === expandedMetaGroupDetails.groups!.length - 1}
-                        style={({ pressed }) => [
-                          styles.reorderButton,
-                          idx === expandedMetaGroupDetails.groups!.length - 1 && styles.disabled,
-                          pressed && styles.pressed,
-                        ]}>
-                        <SymbolView
-                          name={{ ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' }}
-                          size={16}
-                          tintColor={theme.text}
-                        />
-                      </Pressable>
-                      <Pressable
-                        onPress={() => g.id && handleRemoveGroupFromMetaGroup(g.id, g.name)}
-                        style={({ pressed }) => [styles.reorderButton, pressed && styles.pressed]}>
-                        <SymbolView
-                          name={{ ios: 'minus.circle', android: 'remove_circle', web: 'remove_circle' }}
-                          size={18}
-                          tintColor="#ff453a"
-                        />
-                      </Pressable>
-                    </View>
-                  </View>
-                ))}
-              </View>
-            ) : (
-              <ThemedText type="small" themeColor="textSecondary" style={styles.emptyRoutineText}>
-                No hay grupos asignados a esta rutina.
-              </ThemedText>
-            )}
+        {isExpanded && expandedMetaGroupDetails && (() => {
+          // Calculate occurrences of each group in the expanded routine
+          const groupOccurrenceCounts: Record<number, number> = {};
+          const groupsWithOccurrence = (expandedMetaGroupDetails.groups ?? []).map(g => {
+            const gId = g.id!;
+            groupOccurrenceCounts[gId] = (groupOccurrenceCounts[gId] ?? 0) + 1;
+            return {
+              ...g,
+              occurrenceIndex: groupOccurrenceCounts[gId],
+            };
+          });
 
-            <Pressable
-              onPress={() => setIsGroupSelectorOpen(true)}
-              style={({ pressed }) => [
-                styles.addGroupButton,
-                { borderColor: theme.text },
-                pressed && styles.pressed,
-              ]}>
-              <SymbolView name={{ ios: 'plus', android: 'add', web: 'add' }} size={14} tintColor={theme.text} />
-              <ThemedText type="smallBold">Añadir Grupo</ThemedText>
-            </Pressable>
-          </View>
-        )}
+          const getGroupBackgroundColor = (occurrenceIndex: number) => {
+            if (occurrenceIndex === 1) {
+              return theme.background;
+            }
+            return theme.background === '#ffffff' 
+              ? '#e6f0fa' 
+              : '#1a2636';
+          };
+
+          return (
+            <View style={styles.expandedContent}>
+              {groupsWithOccurrence.length > 0 ? (
+                <SortableList
+                  data={groupsWithOccurrence}
+                  keyExtractor={(g) => g.meta_group_item_id?.toString() || `${g.id}-${g.occurrenceIndex}`}
+                  itemHeight={52}
+                  onOrderChange={handleGroupsOrderChange}
+                  renderItem={(g, idx, dragGesture) => (
+                    <View 
+                      style={[
+                        styles.groupItem,
+                        {
+                          backgroundColor: getGroupBackgroundColor(g.occurrenceIndex),
+                          paddingHorizontal: Spacing.two,
+                          height: 48,
+                          borderRadius: Spacing.two,
+                          borderBottomWidth: 0,
+                        }
+                      ]}>
+                      <View style={styles.groupInfo}>
+                        <View style={styles.groupHeaderRow}>
+                          <ThemedText type="smallBold">{g.name}</ThemedText>
+                          {g.occurrenceIndex > 1 && (
+                            <View style={[styles.repeatBadge, { backgroundColor: theme.background === '#ffffff' ? '#3c87f7' : '#2260c0' }]}>
+                              <ThemedText type="smallBold" style={styles.repeatBadgeText}>
+                                {g.occurrenceIndex}x
+                              </ThemedText>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      <View style={styles.groupActions}>
+                        <GestureDetector gesture={dragGesture}>
+                          <View style={styles.reorderButton}>
+                            <SymbolView
+                              name={{ ios: 'line.horizontal.3', android: 'drag_handle', web: 'drag_handle' }}
+                              size={18}
+                              tintColor={theme.text}
+                            />
+                          </View>
+                        </GestureDetector>
+                        <Pressable
+                          onPress={() => g.meta_group_item_id && handleRemoveGroupFromMetaGroup(g.meta_group_item_id, g.name)}
+                          style={({ pressed }) => [styles.reorderButton, pressed && styles.pressed]}>
+                          <SymbolView
+                            name={{ ios: 'minus.circle', android: 'remove_circle', web: 'remove_circle' }}
+                            size={18}
+                            tintColor="#ff453a"
+                          />
+                        </Pressable>
+                      </View>
+                    </View>
+                  )}
+                />
+              ) : (
+                <ThemedText type="small" themeColor="textSecondary" style={styles.emptyRoutineText}>
+                  No hay grupos asignados a esta rutina.
+                </ThemedText>
+              )}
+
+              <Pressable
+                onPress={() => setIsGroupSelectorOpen(true)}
+                style={({ pressed }) => [
+                  styles.addGroupButton,
+                  { borderColor: theme.text },
+                  pressed && styles.pressed,
+                ]}>
+                <SymbolView name={{ ios: 'plus', android: 'add', web: 'add' }} size={14} tintColor={theme.text} />
+                <ThemedText type="smallBold">Añadir Grupo</ThemedText>
+              </Pressable>
+            </View>
+          );
+        })()}
       </ThemedView>
     );
   };
@@ -712,5 +730,22 @@ const styles = StyleSheet.create({
   noAvailableGroups: {
     textAlign: 'center',
     paddingVertical: Spacing.four,
+  },
+  groupHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+  },
+  repeatBadge: {
+    paddingHorizontal: Spacing.one + Spacing.half,
+    paddingVertical: Spacing.half,
+    borderRadius: Spacing.one,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  repeatBadgeText: {
+    fontSize: 10,
+    color: '#ffffff',
+    fontWeight: 'bold',
   },
 });

@@ -5,7 +5,6 @@ import {
   Pressable,
   TextInput,
   Switch,
-  Alert,
   View,
   KeyboardAvoidingView,
   Platform,
@@ -27,11 +26,13 @@ import {
   SeriesConfigItem,
   InitialStateConfig,
 } from '@/database/database';
+import { useAlert } from '@/components/ui/alert-provider';
 
 export default function CreateExerciseScreen() {
   const db = useSQLiteContext();
   const router = useRouter();
   const theme = useTheme();
+  const { alert } = useAlert();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const isEditing = !!id;
 
@@ -91,12 +92,12 @@ export default function CreateExerciseScreen() {
             }
           }
         } else {
-          Alert.alert('Error', 'No se encontró el ejercicio solicitado.');
+          alert('Error', 'No se encontró el ejercicio solicitado.');
           router.back();
         }
       } catch (error) {
         console.error('Error loading exercise for edit:', error);
-        Alert.alert('Error', 'Error al cargar los datos del ejercicio.');
+        alert('Error', 'Error al cargar los datos del ejercicio.');
       } finally {
         setIsLoading(false);
       }
@@ -144,7 +145,7 @@ export default function CreateExerciseScreen() {
   // Form submission handler
   const handleSave = async () => {
     if (!name.trim()) {
-      Alert.alert('Validación', 'El nombre del ejercicio es requerido.');
+      alert('Validación', 'El nombre del ejercicio es requerido.');
       return;
     }
 
@@ -171,18 +172,18 @@ export default function CreateExerciseScreen() {
       setIsLoading(true);
       if (isEditing) {
         await updateExercise(db, parseInt(id!, 10), exerciseData);
-        Alert.alert('Éxito', 'Ejercicio actualizado correctamente.', [
+        alert('Éxito', 'Ejercicio actualizado correctamente.', [
           { text: 'OK', onPress: () => router.back() },
         ]);
       } else {
         await insertExercise(db, exerciseData);
-        Alert.alert('Éxito', 'Ejercicio creado correctamente.', [
+        alert('Éxito', 'Ejercicio creado correctamente.', [
           { text: 'OK', onPress: () => router.back() },
         ]);
       }
     } catch (error) {
       console.error('Error saving exercise:', error);
-      Alert.alert(
+      alert(
         'Error',
         `No se pudo guardar el ejercicio: ${error instanceof Error ? error.message : String(error)}`
       );

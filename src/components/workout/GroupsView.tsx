@@ -4,22 +4,23 @@ import {
   FlatList,
   Pressable,
   TextInput,
-  Alert,
   Modal,
   View,
   ScrollView,
-  Platform,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
 import { SymbolView } from 'expo-symbols';
+import { GestureDetector } from 'react-native-gesture-handler';
 
 import { ConfirmModal } from '@/components/ui/confirm-modal';
+import { useAlert } from '@/components/ui/alert-provider';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Colors, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { SortableList } from '@/components/ui/sortable-list';
 import {
   getGroups,
   getGroupWithExercises,
@@ -37,6 +38,7 @@ import {
 export function GroupsView() {
   const db = useSQLiteContext();
   const theme = useTheme();
+  const { alert } = useAlert();
 
   // State
   const [groups, setGroups] = useState<ExerciseGroup[]>([]);
@@ -88,7 +90,7 @@ export function GroupsView() {
       }
     } catch (error) {
       console.error('Error loading groups:', error);
-      Alert.alert('Error', `No se pudieron cargar los grupos de ejercicios: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudieron cargar los grupos de ejercicios: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsLoading(false);
     }
@@ -119,7 +121,7 @@ export function GroupsView() {
   // Create / Edit Group Save
   const handleSaveGroup = async () => {
     if (!groupNameInput.trim()) {
-      Alert.alert('Validación', 'El nombre del grupo es requerido.');
+      alert('Validación', 'El nombre del grupo es requerido.');
       return;
     }
 
@@ -134,7 +136,7 @@ export function GroupsView() {
       loadData();
     } catch (error) {
       console.error('Error saving group:', error);
-      Alert.alert('Error', `No se pudo guardar el grupo: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo guardar el grupo: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -163,7 +165,7 @@ export function GroupsView() {
       setExpandedGroupDetails(details);
     } catch (error) {
       console.error('Error adding exercise to group:', error);
-      Alert.alert('Error', `No se pudo añadir el ejercicio al grupo: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo añadir el ejercicio al grupo: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -194,7 +196,7 @@ export function GroupsView() {
         loadData();
       } catch (error) {
         console.error('Error deleting group:', error);
-        Alert.alert('Error', `No se pudo eliminar el grupo: ${error instanceof Error ? error.message : String(error)}`);
+        alert('Error', `No se pudo eliminar el grupo: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else if (actionType === 'removeExercise' && exerciseId !== undefined && expandedGroupId) {
       try {
@@ -205,34 +207,24 @@ export function GroupsView() {
         setExpandedGroupDetails(details);
       } catch (error) {
         console.error('Error removing exercise from group:', error);
-        Alert.alert('Error', `No se pudo remover el ejercicio: ${error instanceof Error ? error.message : String(error)}`);
+        alert('Error', `No se pudo remover el ejercicio: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   };
 
-  // Reorder exercises inside group
-  const moveExerciseInGroup = async (index: number, direction: 'up' | 'down') => {
-    if (!expandedGroupDetails?.exercises || !expandedGroupId) return;
-
-    const newList = [...expandedGroupDetails.exercises];
-    const targetIndex = direction === 'up' ? index - 1 : index + 1;
-
-    if (targetIndex < 0 || targetIndex >= newList.length) return;
-
-    // Swap items
-    const temp = newList[index];
-    newList[index] = newList[targetIndex];
-    newList[targetIndex] = temp;
+  // Reorder exercises inside group (via drag and drop)
+  const handleExercisesOrderChange = async (newOrderedExercises: Exercise[]) => {
+    if (!expandedGroupId || !expandedGroupDetails) return;
 
     try {
-      const ids = newList.map((ex) => ex.id!).filter(Boolean);
+      const ids = newOrderedExercises.map((ex) => ex.id!).filter(Boolean);
       await updateGroupExercisesOrder(db, expandedGroupId, ids);
       
       // Refresh local list
-      setExpandedGroupDetails({ ...expandedGroupDetails, exercises: newList });
+      setExpandedGroupDetails({ ...expandedGroupDetails, exercises: newOrderedExercises });
     } catch (error) {
       console.error('Error reordering exercises:', error);
-      Alert.alert('Error', `No se pudo reordenar: ${error instanceof Error ? error.message : String(error)}`);
+      alert('Error', `No se pudo reordenar: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -293,9 +285,24 @@ export function GroupsView() {
         {isExpanded && expandedGroupDetails && (
           <View style={styles.expandedContent}>
             {expandedGroupDetails.exercises && expandedGroupDetails.exercises.length > 0 ? (
-              <View style={styles.exerciseList}>
-                {expandedGroupDetails.exercises.map((ex, idx) => (
-                  <View key={ex.id} style={styles.exerciseItem}>
+              <SortableList
+                data={expandedGroupDetails.exercises}
+                keyExtractor={(ex) => ex.id?.toString() || ''}
+                itemHeight={60}
+                onOrderChange={handleExercisesOrderChange}
+                renderItem={(ex, idx, dragGesture) => (
+                  <View 
+                    style={[
+                      styles.exerciseItem,
+                      {
+                        height: 56,
+                        borderBottomWidth: 0,
+                        paddingVertical: 0,
+                        paddingHorizontal: Spacing.two,
+                        backgroundColor: theme.background,
+                        borderRadius: Spacing.two,
+                      }
+                    ]}>
                     <View style={styles.exerciseInfo}>
                       <ThemedText type="smallBold">{ex.name}</ThemedText>
                       <ThemedText type="small" themeColor="textSecondary">
@@ -305,34 +312,15 @@ export function GroupsView() {
                       </ThemedText>
                     </View>
                     <View style={styles.exerciseActions}>
-                      <Pressable
-                        onPress={() => moveExerciseInGroup(idx, 'up')}
-                        disabled={idx === 0}
-                        style={({ pressed }) => [
-                          styles.reorderButton,
-                          idx === 0 && styles.disabled,
-                          pressed && styles.pressed,
-                        ]}>
-                        <SymbolView
-                          name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }}
-                          size={16}
-                          tintColor={theme.text}
-                        />
-                      </Pressable>
-                      <Pressable
-                        onPress={() => moveExerciseInGroup(idx, 'down')}
-                        disabled={idx === expandedGroupDetails.exercises!.length - 1}
-                        style={({ pressed }) => [
-                          styles.reorderButton,
-                          idx === expandedGroupDetails.exercises!.length - 1 && styles.disabled,
-                          pressed && styles.pressed,
-                        ]}>
-                        <SymbolView
-                          name={{ ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' }}
-                          size={16}
-                          tintColor={theme.text}
-                        />
-                      </Pressable>
+                      <GestureDetector gesture={dragGesture}>
+                        <View style={styles.reorderButton}>
+                          <SymbolView
+                            name={{ ios: 'line.horizontal.3', android: 'drag_handle', web: 'drag_handle' }}
+                            size={18}
+                            tintColor={theme.text}
+                          />
+                        </View>
+                      </GestureDetector>
                       <Pressable
                         onPress={() => ex.id && handleRemoveExerciseFromGroup(ex.id, ex.name)}
                         style={({ pressed }) => [styles.reorderButton, pressed && styles.pressed]}>
@@ -344,8 +332,8 @@ export function GroupsView() {
                       </Pressable>
                     </View>
                   </View>
-                ))}
-              </View>
+                )}
+              />
             ) : (
               <ThemedText type="small" themeColor="textSecondary" style={styles.emptyGroupText}>
                 No hay ejercicios en este grupo.
