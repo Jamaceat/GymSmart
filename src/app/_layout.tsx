@@ -1,15 +1,19 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { DarkTheme, DefaultTheme, ThemeProvider, Stack } from 'expo-router';
 import { useColorScheme } from 'react-native';
+import { SQLiteProvider } from 'expo-sqlite';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { migrateDbIfNeeded } from '@/database/database';
 
-export default function TabLayout() {
+export default function RootLayout() {
   const colorScheme = useColorScheme();
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
+      <SQLiteProvider databaseName="gymsmart.db" onInit={migrateDbIfNeeded}>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="exercises/create" options={{ presentation: 'modal' }} />
+        </Stack>
+      </SQLiteProvider>
     </ThemeProvider>
   );
 }
