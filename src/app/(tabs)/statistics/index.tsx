@@ -286,9 +286,8 @@ export default function StatisticsScreen() {
   };
 
   const displayedStats = React.useMemo(() => {
-    let combined = [...stats];
-
     if (showUnperformed) {
+      const combined: ExerciseStatItem[] = [];
       allExercises.forEach((ex) => {
         const isAlreadyInStats = stats.some(
           (s) => s.exercise_id === ex.id || s.exercise_name.toLowerCase() === ex.name.toLowerCase()
@@ -309,9 +308,10 @@ export default function StatisticsScreen() {
           });
         }
       });
+      return combined;
     }
 
-    return combined;
+    return stats;
   }, [stats, allExercises, allTimeStats, showUnperformed]);
 
   const filteredStats = displayedStats.filter((item) =>
@@ -595,9 +595,12 @@ export default function StatisticsScreen() {
             <View style={styles.statsList}>
               {filteredStats.length > 0 ? (
                 filteredStats.map((item, index) => {
+                  const isUnperformed = item.times_done === 0;
                   const originalIndex = stats.findIndex(s => s.exercise_id === item.exercise_id && s.exercise_name === item.exercise_name);
                   const actualIndex = originalIndex !== -1 ? originalIndex : index;
-                  const rankColor = getRankStyle(actualIndex);
+                  const rankColor = isUnperformed
+                    ? { backgroundColor: theme.backgroundSelected, text: theme.textSecondary }
+                    : getRankStyle(actualIndex);
                   const percentOfMax = item.historical_max_reps > 0
                     ? Math.min(100, (item.total_reps / item.historical_max_reps) * 100)
                     : 0;
@@ -632,7 +635,7 @@ export default function StatisticsScreen() {
                             {/* Position badge */}
                             <View style={[styles.rankBadge, { backgroundColor: rankColor.backgroundColor }]}>
                               <ThemedText style={{ color: rankColor.text, fontWeight: 'bold', fontSize: 12 }}>
-                                {actualIndex + 1}°
+                                {isUnperformed ? '-' : `${actualIndex + 1}°`}
                               </ThemedText>
                             </View>
                             
