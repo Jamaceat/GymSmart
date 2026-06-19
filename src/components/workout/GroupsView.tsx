@@ -286,53 +286,56 @@ export function GroupsView() {
           <View style={styles.expandedContent}>
             {expandedGroupDetails.exercises && expandedGroupDetails.exercises.length > 0 ? (
               <SortableList
-                data={expandedGroupDetails.exercises}
-                keyExtractor={(ex) => ex.id?.toString() || ''}
+                data={expandedGroupDetails.exercises.filter(Boolean)}
+                keyExtractor={(ex) => ex?.id?.toString() || Math.random().toString()}
                 itemHeight={60}
                 onOrderChange={handleExercisesOrderChange}
-                renderItem={(ex, idx, dragGesture) => (
-                  <View 
-                    style={[
-                      styles.exerciseItem,
-                      {
-                        height: 56,
-                        borderBottomWidth: 0,
-                        paddingVertical: 0,
-                        paddingHorizontal: Spacing.two,
-                        backgroundColor: theme.background,
-                        borderRadius: Spacing.two,
-                      }
-                    ]}>
-                    <View style={styles.exerciseInfo}>
-                      <ThemedText type="smallBold">{ex.name}</ThemedText>
-                      <ThemedText type="small" themeColor="textSecondary">
-                        {ex.is_constant === 1
-                          ? `${ex.default_sets} x ${ex.default_reps}`
-                          : `${ex.default_sets} series var.`}
-                      </ThemedText>
-                    </View>
-                    <View style={styles.exerciseActions}>
-                      <GestureDetector gesture={dragGesture}>
-                        <View style={styles.reorderButton}>
+                renderItem={(ex, idx, dragGesture) => {
+                  if (!ex) return null;
+                  return (
+                    <View 
+                      style={[
+                        styles.exerciseItem,
+                        {
+                          height: 56,
+                          borderBottomWidth: 0,
+                          paddingVertical: 0,
+                          paddingHorizontal: Spacing.two,
+                          backgroundColor: theme.background,
+                          borderRadius: Spacing.two,
+                        }
+                      ]}>
+                      <View style={styles.exerciseInfo}>
+                        <ThemedText type="smallBold">{ex.name || 'Ejercicio'}</ThemedText>
+                        <ThemedText type="small" themeColor="textSecondary">
+                          {ex.is_constant === 1
+                            ? `${ex.default_sets || 0} x ${ex.default_reps || 0}`
+                            : `${ex.default_sets || 0} series var.`}
+                        </ThemedText>
+                      </View>
+                      <View style={styles.exerciseActions}>
+                        <GestureDetector gesture={dragGesture}>
+                          <View style={styles.reorderButton}>
+                            <SymbolView
+                              name={{ ios: 'line.horizontal.3', android: 'drag_handle', web: 'drag_handle' }}
+                              size={18}
+                              tintColor={theme.text}
+                            />
+                          </View>
+                        </GestureDetector>
+                        <Pressable
+                          onPress={() => ex.id && handleRemoveExerciseFromGroup(ex.id, ex.name)}
+                          style={({ pressed }) => [styles.reorderButton, pressed && styles.pressed]}>
                           <SymbolView
-                            name={{ ios: 'line.horizontal.3', android: 'drag_handle', web: 'drag_handle' }}
+                            name={{ ios: 'minus.circle', android: 'remove_circle', web: 'remove_circle' }}
                             size={18}
-                            tintColor={theme.text}
+                            tintColor="#ff453a"
                           />
-                        </View>
-                      </GestureDetector>
-                      <Pressable
-                        onPress={() => ex.id && handleRemoveExerciseFromGroup(ex.id, ex.name)}
-                        style={({ pressed }) => [styles.reorderButton, pressed && styles.pressed]}>
-                        <SymbolView
-                          name={{ ios: 'minus.circle', android: 'remove_circle', web: 'remove_circle' }}
-                          size={18}
-                          tintColor="#ff453a"
-                        />
-                      </Pressable>
+                        </Pressable>
+                      </View>
                     </View>
-                  </View>
-                )}
+                  );
+                }}
               />
             ) : (
               <ThemedText type="small" themeColor="textSecondary" style={styles.emptyGroupText}>

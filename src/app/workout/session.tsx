@@ -78,6 +78,7 @@ export default function WorkoutSessionScreen() {
   const [completedSets, setCompletedSets] = useState<Set<number>>(new Set()); // 1-based set indices completed for active exercise
   const [currentSet, setCurrentSet] = useState<number>(1);
   const [setTimes, setSetTimes] = useState<Record<number, number>>({});
+  const [customReps, setCustomReps] = useState<Record<string, Record<number, number>>>({});
 
   // Timer State
   const [activeSeconds, setActiveSeconds] = useState<number>(0);
@@ -103,6 +104,7 @@ export default function WorkoutSessionScreen() {
     completedSets,
     completedExercises,
     setTimes,
+    customReps,
   });
 
   useEffect(() => {
@@ -115,8 +117,9 @@ export default function WorkoutSessionScreen() {
       completedSets,
       completedExercises,
       setTimes,
+      customReps,
     };
-  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes]);
+  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes, customReps]);
 
   // Flattened active exercise helper
   const activeSessionItem = sessionExercises[activeIndex] || null;
@@ -144,17 +147,20 @@ export default function WorkoutSessionScreen() {
       currSet: number,
       doneSets: Set<number>,
       doneExs: Set<string>,
-      timesMap?: Record<number, number>
+      timesMap?: Record<number, number>,
+      customRepsMap?: Record<string, Record<number, number>>
     ) => {
       try {
         const doneSetsStr = Array.from(doneSets).join(',');
         const doneExsStr = Array.from(doneExs).join(',');
         const currentTimes = timesMap || stateRef.current.setTimes || {};
         const setTimesStr = JSON.stringify(currentTimes);
+        const currentCustomReps = customRepsMap || stateRef.current.customReps || {};
+        const customRepsStr = JSON.stringify(currentCustomReps);
         await db.runAsync(
           `INSERT OR REPLACE INTO session_progress 
-            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times, custom_reps) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             parseInt(metaGroupId!, 10),
             date,
@@ -166,6 +172,7 @@ export default function WorkoutSessionScreen() {
             doneSetsStr,
             doneExsStr,
             setTimesStr,
+            customRepsStr,
           ]
         );
       } catch (e) {
@@ -228,6 +235,7 @@ export default function WorkoutSessionScreen() {
               completed_sets: string | null;
               completed_exercises: string | null;
               set_times: string | null;
+              custom_reps: string | null;
             }>(
               'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
               [mGroupId, date]
@@ -263,9 +271,20 @@ export default function WorkoutSessionScreen() {
               } else {
                 setSetTimes({});
               }
+
+              if (progress.custom_reps) {
+                try {
+                  setCustomReps(JSON.parse(progress.custom_reps));
+                } catch (e) {
+                  setCustomReps({});
+                }
+              } else {
+                setCustomReps({});
+              }
             } else {
               setActiveIndex(0);
               setCompletedExercises(new Set());
+              setCustomReps({});
             }
           }
         }
@@ -390,6 +409,31 @@ export default function WorkoutSessionScreen() {
     }
   };
 
+  // Update specific set reps during session
+  const handleUpdateReps = (setNum: number, newReps: number) => {
+    if (!activeSessionItem) return;
+    const uniqueId = activeSessionItem.uniqueId;
+    const updatedCustomReps = {
+      ...customReps,
+      [uniqueId]: {
+        ...(customReps[uniqueId] || {}),
+        [setNum]: newReps,
+      },
+    };
+    setCustomReps(updatedCustomReps);
+    saveProgress(
+      activeIndex,
+      activeSeconds,
+      restSeconds,
+      isResting,
+      currentSet,
+      completedSets,
+      completedExercises,
+      setTimes,
+      updatedCustomReps
+    );
+  };
+
   // Cross-timer interval logic
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -492,6 +536,8 @@ export default function WorkoutSessionScreen() {
 
   // Custom reset logic
   const handleCustomReset = () => {
+    if (!activeSessionItem) return;
+
     // Reset timer metrics
     setActiveSeconds(0);
     setRestSeconds(0);
@@ -511,6 +557,17 @@ export default function WorkoutSessionScreen() {
     setCompletedSets(nextCompletedSets);
     setSetTimes(nextSetTimes);
 
+    // Update reps for the reset set to the specified resetReps
+    const uniqueId = activeSessionItem.uniqueId;
+    const updatedCustomReps = {
+      ...customReps,
+      [uniqueId]: {
+        ...(customReps[uniqueId] || {}),
+        [resetSet]: resetReps,
+      },
+    };
+    setCustomReps(updatedCustomReps);
+
     setShowResetOptions(false);
     
     saveProgress(
@@ -521,7 +578,8 @@ export default function WorkoutSessionScreen() {
       resetSet,
       nextCompletedSets,
       completedExercises,
-      nextSetTimes
+      nextSetTimes,
+      updatedCustomReps
     );
 
     alert('Reiniciado', `Ejercicio reiniciado en la Serie ${resetSet} con ${resetReps} repeticiones.`);
@@ -574,7 +632,7 @@ export default function WorkoutSessionScreen() {
 
         // Insert audit for each completed set
         for (const setNum of completedSets) {
-          const reps = seriesReps[setNum] ?? ex.default_reps ?? 10;
+          const reps = customReps[activeSessionItem.uniqueId]?.[setNum] ?? seriesReps[setNum] ?? ex.default_reps ?? 10;
           const secs = setTimes[setNum] ?? 0;
           await insertExerciseCompletionAudit(db, {
             exercise_id: ex.id || null,
@@ -1005,9 +1063,46 @@ export default function WorkoutSessionScreen() {
                           </View>
 
                           <View style={styles.seriesItemRight}>
-                            <ThemedText type="code" themeColor="textSecondary">
-                              {item.reps} reps{setTimes[setNum] !== undefined && ` • ${formatTime(setTimes[setNum])}`}
-                            </ThemedText>
+                            {(() => {
+                              const currentRepsValue = customReps[activeSessionItem.uniqueId]?.[setNum] ?? item.reps;
+                              return (
+                                <View style={styles.repsCounterContainer}>
+                                  <Pressable
+                                    onPress={(e) => {
+                                      e.stopPropagation();
+                                      handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1));
+                                    }}
+                                    style={({ pressed }) => [
+                                      styles.repsCounterBtn,
+                                      pressed && styles.repsCounterBtnPressed,
+                                    ]}>
+                                    <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>-</ThemedText>
+                                  </Pressable>
+                                  <ThemedText type="smallBold" style={styles.repsCounterValue}>
+                                    {currentRepsValue}
+                                  </ThemedText>
+                                  <Pressable
+                                    onPress={(e) => {
+                                      e.stopPropagation();
+                                      handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1));
+                                    }}
+                                    style={({ pressed }) => [
+                                      styles.repsCounterBtn,
+                                      pressed && styles.repsCounterBtnPressed,
+                                    ]}>
+                                    <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>+</ThemedText>
+                                  </Pressable>
+                                  <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                    reps
+                                  </ThemedText>
+                                </View>
+                              );
+                            })()}
+                            {setTimes[setNum] !== undefined && (
+                              <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                • {formatTime(setTimes[setNum])}
+                              </ThemedText>
+                            )}
                             {isActiveSet && (
                               <View style={styles.activeSetBadge}>
                                 <ThemedText type="code" style={styles.activeSetBadgeText}>
@@ -1582,6 +1677,28 @@ const styles = StyleSheet.create({
     fontSize: 8,
     color: '#ffffff',
     fontWeight: 'bold',
+  },
+  repsCounterContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  repsCounterBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(128,128,128,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  repsCounterBtnPressed: {
+    opacity: 0.6,
+  },
+  repsCounterValue: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    minWidth: 20,
+    textAlign: 'center',
   },
   // Action Buttons
   primaryActions: {

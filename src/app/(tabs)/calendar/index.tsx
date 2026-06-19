@@ -79,7 +79,7 @@ export default function CalendarScreen() {
   const [scheduledRoutines, setScheduledRoutines] = useState<ScheduledRoutine[]>([]);
   const [allRoutines, setAllRoutines] = useState<MetaGroup[]>([]);
   const [expandedRoutineId, setExpandedRoutineId] = useState<number | null>(null);
-  const [expandedRoutineDetails, setExpandedRoutineDetails] = useState<MetaGroup | null>(null);
+  const [expandedRoutineDetails, setExpandedRoutineDetails] = useState<(MetaGroup & { summary?: { name: string; totalReps: number; setsCount: number }[] }) | null>(null);
   
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -181,6 +181,7 @@ export default function CalendarScreen() {
         routine_name: string;
         completed_date: string;
         group_name: string | null;
+        meta_group_item_id: number | null;
       }>(
         `SELECT * FROM exercise_completion_audits 
          WHERE routine_id = ? AND completed_date = ? 
@@ -195,7 +196,7 @@ export default function CalendarScreen() {
         liveGroups = await Promise.all(
           routineData.groups.map(async (g) => {
             const fullGroup = await getGroupWithExercises(db, g.id!);
-            return fullGroup || g;
+            return fullGroup ? { ...fullGroup, meta_group_item_id: g.meta_group_item_id } : g;
           })
         );
       }
@@ -207,7 +208,7 @@ export default function CalendarScreen() {
             // Try matching with live groups first
             if (liveGroups.length > 0) {
               const matchingGroup = liveGroups.find(g => 
-                g.exercises?.some(ex => ex.id === audit.exercise_id || ex.name === audit.exercise_name)
+                g.exercises?.some(ex => ex && (ex.id === audit.exercise_id || ex.name === audit.exercise_name))
               );
               if (matchingGroup) {
                 audit.group_name = matchingGroup.name;
@@ -231,35 +232,64 @@ export default function CalendarScreen() {
         }
       }
 
+      // Calculate summary of completed exercises for the routine (grouped across groups)
+      const summaryMap: Record<string, { name: string; totalReps: number; setsCount: number }> = {};
+      if (audits.length > 0) {
+        audits.forEach(audit => {
+          const key = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
+          if (!summaryMap[key]) {
+            summaryMap[key] = {
+              name: audit.exercise_name,
+              totalReps: 0,
+              setsCount: 0,
+            };
+          }
+          summaryMap[key].totalReps += audit.repetitions;
+          summaryMap[key].setsCount += 1;
+        });
+      }
+      const summaryList = Object.values(summaryMap);
+
       if (liveGroups.length > 0) {
         // We have a live template! Let's merge live template + audits
-        // Group audits by exercise_id or exercise_name
-        const auditsByExercise: Record<string, typeof audits> = {};
+        // Group audits by meta_group_item_id and exercise_id (or fallback for older logs)
+        const auditsByExInstance: Record<string, typeof audits> = {};
         audits.forEach(audit => {
-          const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
-          if (!auditsByExercise[exKey]) {
-            auditsByExercise[exKey] = [];
+          const key = audit.meta_group_item_id && audit.exercise_id
+            ? `${audit.meta_group_item_id}-${audit.exercise_id}`
+            : (audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name);
+          if (!auditsByExInstance[key]) {
+            auditsByExInstance[key] = [];
           }
-          auditsByExercise[exKey].push(audit);
+          auditsByExInstance[key].push(audit);
         });
 
-        // Track which audited exercises we've displayed
-        const displayedAuditKeys = new Set<string>();
+        // Track which audited exercises we've displayed using audit ID
+        const displayedAuditIds = new Set<number>();
 
         const mergedGroups = liveGroups.map((group) => {
-          const exercises = (group.exercises ?? []).map((ex) => {
-            const exKey = ex.id ? String(ex.id) : ex.name;
-            const exAudits = auditsByExercise[exKey];
+          const exercises = (group.exercises ?? []).filter(Boolean).map((ex) => {
+            // Match audits: try matching specific instance first
+            const instanceKey = group.meta_group_item_id && ex.id ? `${group.meta_group_item_id}-${ex.id}` : null;
+            let exAudits = instanceKey ? auditsByExInstance[instanceKey] : null;
+
+            // Fallback: match by exercise_id or name for older logs that don't have meta_group_item_id
+            if (!exAudits || exAudits.length === 0) {
+              const fallbackKey = ex.id ? String(ex.id) : ex.name;
+              exAudits = auditsByExInstance[fallbackKey];
+            }
 
             if (exAudits && exAudits.length > 0) {
-              displayedAuditKeys.add(exKey);
+              exAudits.forEach(a => {
+                if (a.id) displayedAuditIds.add(a.id);
+              });
               exAudits.sort((a, b) => a.set_index - b.set_index);
               const repsList = exAudits.map(a => a.repetitions);
               const allRepsSame = repsList.every(r => r === repsList[0]);
               const totalSets = exAudits.length;
               const repsDisplay = allRepsSame 
                 ? `${totalSets} x ${repsList[0]} reps` 
-                : `${repsList.join('-')} reps`;
+                : `${repsList.reduce((sum, r) => sum + r, 0)} reps`;
 
               return {
                 ...ex,
@@ -279,8 +309,7 @@ export default function CalendarScreen() {
 
         // Include any exercises that were completed historically but have since been removed from the template
         const extraAudits = audits.filter(audit => {
-          const exKey = audit.exercise_id ? String(audit.exercise_id) : audit.exercise_name;
-          return !displayedAuditKeys.has(exKey);
+          return audit.id && !displayedAuditIds.has(audit.id);
         });
 
         if (extraAudits.length > 0) {
@@ -303,7 +332,7 @@ export default function CalendarScreen() {
             const totalSets = exAudits.length;
             const repsDisplay = allRepsSame 
               ? `${totalSets} x ${repsList[0]} reps` 
-              : `${repsList.join('-')} reps`;
+              : `${repsList.reduce((sum, r) => sum + r, 0)} reps`;
 
             const reconstructedEx = {
               id: firstAudit.exercise_id ?? undefined,
@@ -339,7 +368,8 @@ export default function CalendarScreen() {
           id: routineData?.id,
           name: routineData?.name || '',
           created_at: routineData?.created_at,
-          groups: mergedGroups
+          groups: mergedGroups,
+          summary: summaryList
         });
       } else {
         // No live template (deleted). Reconstruct purely from audits
@@ -368,7 +398,7 @@ export default function CalendarScreen() {
               const totalSets = exAudits.length;
               const repsDisplay = allRepsSame 
                 ? `${totalSets} x ${repsList[0]} reps` 
-                : `${repsList.join('-')} reps`;
+                : `${repsList.reduce((sum, r) => sum + r, 0)} reps`;
 
               return {
                 id: firstAudit.exercise_id ?? undefined,
@@ -396,7 +426,8 @@ export default function CalendarScreen() {
             id: metaGroupId,
             name: audits[0]?.routine_name || 'Rutina Completada',
             groups: reconstructedGroups,
-            isAudit: true
+            isAudit: true,
+            summary: summaryList
           } as any);
         } else {
           // No audits, no live template
@@ -790,8 +821,8 @@ export default function CalendarScreen() {
                                   </View>
                                   {group.exercises && group.exercises.length > 0 ? (
                                     <View style={styles.exerciseList}>
-                                      {group.exercises.map((ex) => (
-                                        <View key={ex.id ? `${ex.id}` : ex.name} style={styles.exerciseItem}>
+                                      {group.exercises.filter(Boolean).map((ex) => (
+                                        <View key={ex.id ? `${ex.id}` : ex.name || Math.random().toString()} style={styles.exerciseItem}>
                                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.one, flex: 1 }}>
                                             {ex.isAudit && (
                                               <SymbolView
@@ -801,14 +832,14 @@ export default function CalendarScreen() {
                                               />
                                             )}
                                             <ThemedText type="small" style={styles.exerciseName} numberOfLines={1}>
-                                              {ex.isAudit ? ex.name : `• ${ex.name}`}
+                                              {ex.isAudit ? ex.name || 'Ejercicio' : `• ${ex.name || 'Ejercicio'}`}
                                             </ThemedText>
                                           </View>
                                           <ThemedText type="small" themeColor="textSecondary">
                                             {ex.repsDisplay !== undefined
                                               ? ex.repsDisplay
                                               : ex.is_constant === 1
-                                              ? `${ex.default_sets} x ${ex.default_reps} reps`
+                                              ? `${ex.default_sets || 0} x ${ex.default_reps || 0} reps`
                                               : 'Series variables'}
                                           </ThemedText>
                                         </View>
@@ -821,6 +852,27 @@ export default function CalendarScreen() {
                                   )}
                                 </View>
                               ))}
+
+                              {/* Resumen de Ejercicios Realizados */}
+                              {expandedRoutineDetails && expandedRoutineDetails.summary && expandedRoutineDetails.summary.length > 0 && (
+                                <ThemedView type="background" style={styles.summaryBlock}>
+                                  <ThemedText type="smallBold" style={styles.summaryTitle}>
+                                    Resumen de Ejercicios Realizados (Volumen Total)
+                                  </ThemedText>
+                                  <View style={styles.summaryList}>
+                                    {expandedRoutineDetails.summary.map((sumItem, sIdx) => (
+                                      <View key={sIdx} style={styles.summaryItem}>
+                                        <ThemedText type="small" style={styles.summaryName}>
+                                          {sumItem.name}
+                                        </ThemedText>
+                                        <ThemedText type="smallBold" themeColor="textSecondary">
+                                          {sumItem.setsCount} series • {sumItem.totalReps} reps totales
+                                        </ThemedText>
+                                      </View>
+                                    ))}
+                                  </View>
+                                </ThemedView>
+                              )}
 
                               <Pressable
                                 onPress={() => {
@@ -1279,5 +1331,32 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 14,
     height: '100%',
+  },
+  summaryBlock: {
+    padding: Spacing.two + Spacing.half,
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    borderColor: 'rgba(128, 128, 128, 0.15)',
+    marginTop: Spacing.one,
+    marginBottom: Spacing.two,
+  },
+  summaryTitle: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    marginBottom: Spacing.one + Spacing.half,
+    color: '#3c87f7',
+  },
+  summaryList: {
+    gap: Spacing.one,
+  },
+  summaryItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Spacing.half,
+  },
+  summaryName: {
+    fontWeight: '600',
+    flex: 1,
   },
 });

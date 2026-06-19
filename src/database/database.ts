@@ -194,6 +194,11 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
       await db.execAsync('ALTER TABLE session_progress ADD COLUMN set_times TEXT;');
     }
 
+    // Ensure custom_reps column exists in session_progress table
+    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('custom_reps')) {
+      await db.execAsync('ALTER TABLE session_progress ADD COLUMN custom_reps TEXT;');
+    }
+
     // Ensure set_index column exists in exercise_completion_audits table
     const auditsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(exercise_completion_audits);");
     const auditsColumns = auditsCheck.map(c => c.name);

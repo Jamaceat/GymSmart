@@ -10,6 +10,7 @@ import {
   useWindowDimensions,
   Platform,
   GestureResponderEvent,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSQLiteContext } from 'expo-sqlite';
@@ -37,11 +38,13 @@ import {
   getExerciseStatsAllTime,
   getExerciseStatsForRange,
   getExerciseProgressHistory,
+  getExercises,
+  Exercise,
   ExerciseStatItem,
   ExerciseProgressHistoryItem,
 } from '@/database/database';
 
-type FilterType = 'all' | 'week' | 'month' | 'custom';
+type FilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 export default function StatisticsScreen() {
   const db = useSQLiteContext();
@@ -64,6 +67,9 @@ export default function StatisticsScreen() {
   
   // Loaded stats data
   const [stats, setStats] = useState<ExerciseStatItem[]>([]);
+  const [allTimeStats, setAllTimeStats] = useState<ExerciseStatItem[]>([]);
+  const [allExercises, setAllExercises] = useState<Exercise[]>([]);
+  const [showUnperformed, setShowUnperformed] = useState(false);
   const [completedRoutines, setCompletedRoutines] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -186,6 +192,9 @@ export default function StatisticsScreen() {
   useEffect(() => {
     if (filterType === 'all') {
       setAppliedRange(null);
+    } else if (filterType === 'today') {
+      const todayStr = formatDate(new Date());
+      setAppliedRange({ start: todayStr, end: todayStr });
     } else if (filterType === 'week') {
       const range = getWeekRange();
       setAppliedRange(range);
@@ -202,11 +211,13 @@ export default function StatisticsScreen() {
     try {
       setIsLoading(true);
       let data: ExerciseStatItem[] = [];
+      let allTimeData: ExerciseStatItem[] = [];
       let routinesCount = 0;
 
       if (appliedRange === null) {
         // All-time stats
         data = await getExerciseStatsAllTime(db);
+        allTimeData = data;
         
         const res = await db.getFirstAsync<{ count: number }>(
           'SELECT COUNT(id) as count FROM scheduled_routines WHERE is_completed = 1'
@@ -215,6 +226,7 @@ export default function StatisticsScreen() {
       } else {
         // Range stats
         data = await getExerciseStatsForRange(db, appliedRange.start, appliedRange.end);
+        allTimeData = await getExerciseStatsAllTime(db);
         
         const res = await db.getFirstAsync<{ count: number }>(
           'SELECT COUNT(id) as count FROM scheduled_routines WHERE is_completed = 1 AND scheduled_date BETWEEN ? AND ?',
@@ -223,6 +235,9 @@ export default function StatisticsScreen() {
         routinesCount = res?.count ?? 0;
       }
 
+      const exercisesList = await getExercises(db);
+      setAllExercises(exercisesList);
+      setAllTimeStats(allTimeData);
       setStats(data);
       setCompletedRoutines(routinesCount);
     } catch (e) {
@@ -270,7 +285,36 @@ export default function StatisticsScreen() {
     });
   };
 
-  const filteredStats = stats.filter((item) =>
+  const displayedStats = React.useMemo(() => {
+    let combined = [...stats];
+
+    if (showUnperformed) {
+      allExercises.forEach((ex) => {
+        const isAlreadyInStats = stats.some(
+          (s) => s.exercise_id === ex.id || s.exercise_name.toLowerCase() === ex.name.toLowerCase()
+        );
+
+        if (!isAlreadyInStats) {
+          const allTimeMatch = allTimeStats.find(
+            (s) => s.exercise_id === ex.id || s.exercise_name.toLowerCase() === ex.name.toLowerCase()
+          );
+          const maxReps = allTimeMatch ? allTimeMatch.historical_max_reps : 0;
+
+          combined.push({
+            exercise_id: ex.id ?? null,
+            exercise_name: ex.name,
+            total_reps: 0,
+            times_done: 0,
+            historical_max_reps: maxReps,
+          });
+        }
+      });
+    }
+
+    return combined;
+  }, [stats, allExercises, allTimeStats, showUnperformed]);
+
+  const filteredStats = displayedStats.filter((item) =>
     item.exercise_name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -302,10 +346,11 @@ export default function StatisticsScreen() {
 
         {/* Segmented Filter Pills */}
         <View style={styles.filterRow}>
-          {(['all', 'week', 'month', 'custom'] as FilterType[]).map((type) => {
+          {(['all', 'today', 'week', 'month', 'custom'] as FilterType[]).map((type) => {
             const isActive = filterType === type;
             const labels: Record<FilterType, string> = {
               all: 'Histórico',
+              today: 'Hoy',
               week: 'Esta Semana',
               month: 'Este Mes',
               custom: 'Personalizado',
@@ -454,6 +499,8 @@ export default function StatisticsScreen() {
             <ThemedText style={styles.emptySubtitle} type="small" themeColor="textSecondary">
               {filterType === 'custom' && appliedRange === null
                 ? 'Ingresa un rango de fechas y presiona buscar para cargar las estadísticas.'
+                : filterType === 'today'
+                ? 'No se encontraron rutinas terminadas hoy.'
                 : 'No se encontraron rutinas terminadas en este periodo de tiempo.'}
             </ThemedText>
           </ScrollView>
@@ -500,9 +547,23 @@ export default function StatisticsScreen() {
             </View>
 
             {/* Ranking Header */}
-            <ThemedText type="smallBold" style={styles.sectionTitle}>
-              Volumen de Trabajo por Ejercicio
-            </ThemedText>
+            <View style={styles.sectionHeaderRow}>
+              <ThemedText type="smallBold" style={styles.sectionTitle}>
+                Volumen de Trabajo por Ejercicio
+              </ThemedText>
+              <View style={styles.toggleContainer}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  Mostrar no realizados
+                </ThemedText>
+                <Switch
+                  value={showUnperformed}
+                  onValueChange={setShowUnperformed}
+                  trackColor={{ false: '#767577', true: '#3c87f7' }}
+                  thumbColor={showUnperformed ? '#ffffff' : '#f4f3f4'}
+                  style={{ transform: Platform.OS === 'ios' ? [{ scaleX: 0.8 }, { scaleY: 0.8 }] : [] }}
+                />
+              </View>
+            </View>
 
             {/* Search Bar */}
             <View style={[styles.searchBarContainer, { backgroundColor: theme.backgroundElement }]}>
@@ -607,7 +668,7 @@ export default function StatisticsScreen() {
                             style={[
                               styles.progressBar,
                               {
-                                width: `${Math.max(5, percentOfMax)}%`,
+                                width: `${item.total_reps > 0 ? Math.max(5, percentOfMax) : 0}%`,
                                 backgroundColor: actualIndex === 0 ? '#FFD700' : '#3c87f7',
                               },
                             ]}
@@ -895,10 +956,20 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginTop: Spacing.half,
   },
-  sectionTitle: {
-    fontSize: 16,
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: Spacing.three,
     marginBottom: Spacing.half,
+  },
+  sectionTitle: {
+    fontSize: 16,
+  },
+  toggleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
   },
   statsList: {
     gap: Spacing.two,
