@@ -549,10 +549,10 @@ export default function WorkoutSessionScreen() {
         const ex = activeExercise;
         if (!ex) return;
 
-        // Delete any existing audits for this exercise in this routine on this date to prevent duplicates
+        // Delete any existing audits for this exercise instance in this routine on this date to prevent duplicates
         await db.runAsync(
-          'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ?',
-          [ex.id || null, routineId, auditDate]
+          'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?',
+          [ex.id || null, routineId, auditDate, activeSessionItem.metaGroupItemId]
         );
 
         // Get the series configs to know the reps for each set
@@ -586,6 +586,7 @@ export default function WorkoutSessionScreen() {
             routine_name: routineName,
             completed_date: auditDate,
             group_name: activeSessionItem.groupName,
+            meta_group_item_id: activeSessionItem.metaGroupItemId,
           });
         }
       } catch (e) {

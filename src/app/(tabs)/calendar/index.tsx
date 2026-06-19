@@ -7,6 +7,7 @@ import {
   Modal,
   Dimensions,
   Platform,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSQLiteContext } from 'expo-sqlite';
@@ -82,11 +83,18 @@ export default function CalendarScreen() {
   
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   // Confirmation Modal State
   const [confirmModalVisible, setConfirmModalVisible] = useState(false);
-  const [itemToDelete, setItemToDelete] = useState<{ id: number; name: string } | null>(null);
+  const [itemToDelete, setItemToDelete] = useState<{
+    id: number;
+    metaGroupId: number;
+    date: string;
+    name: string;
+    isCompleted: boolean;
+  } | null>(null);
 
   // Generate 7 days of the current week (Monday to Sunday)
   const daysOfWeek = Array.from({ length: 7 }, (_, i) => {
@@ -440,8 +448,14 @@ export default function CalendarScreen() {
   };
 
   // Remove routine assignment
-  const handleUnscheduleRoutine = (scheduledId: number, name: string) => {
-    setItemToDelete({ id: scheduledId, name });
+  const handleUnscheduleRoutine = (
+    scheduledId: number,
+    metaGroupId: number,
+    dateStr: string,
+    name: string,
+    isCompleted: boolean
+  ) => {
+    setItemToDelete({ id: scheduledId, metaGroupId, date: dateStr, name, isCompleted });
     setConfirmModalVisible(true);
   };
 
@@ -453,7 +467,7 @@ export default function CalendarScreen() {
         setExpandedRoutineId(null);
         setExpandedRoutineDetails(null);
       }
-      await deleteScheduledRoutine(db, itemToDelete.id);
+      await deleteScheduledRoutine(db, itemToDelete.id, itemToDelete.metaGroupId, itemToDelete.date);
       loadData();
     } catch (error) {
       console.error('Error deleting scheduled routine:', error);
@@ -467,6 +481,10 @@ export default function CalendarScreen() {
   const selectedDateStr = formatDateString(selectedDate);
   const routinesForSelectedDay = scheduledRoutines.filter(
     (sr) => sr.scheduled_date === selectedDateStr
+  );
+
+  const filteredRoutines = allRoutines.filter((routine) =>
+    routine.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   // Helper to format the range of the current week (e.g. "Junio 2026")
@@ -703,7 +721,13 @@ export default function CalendarScreen() {
                           />
                         </Pressable>
                         <Pressable
-                          onPress={() => handleUnscheduleRoutine(sr.id, sr.meta_group_name)}
+                          onPress={() => handleUnscheduleRoutine(
+                            sr.id,
+                            sr.meta_group_id,
+                            sr.scheduled_date,
+                            sr.meta_group_name,
+                            sr.is_completed === 1
+                          )}
                           style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed]}
                           accessibilityLabel="Quitar rutina">
                           <SymbolView
@@ -846,7 +870,10 @@ export default function CalendarScreen() {
 
           {/* Action Button to schedule a routine */}
           <Pressable
-            onPress={() => setIsAddModalOpen(true)}
+            onPress={() => {
+              setSearchQuery('');
+              setIsAddModalOpen(true);
+            }}
             style={({ pressed }) => [
               styles.scheduleButton,
               { backgroundColor: theme.text },
@@ -870,7 +897,10 @@ export default function CalendarScreen() {
           visible={isAddModalOpen}
           transparent
           animationType="slide"
-          onRequestClose={() => setIsAddModalOpen(false)}>
+          onRequestClose={() => {
+            setIsAddModalOpen(false);
+            setSearchQuery('');
+          }}>
           <View style={styles.modalOverlay}>
             <ThemedView type="backgroundElement" style={styles.modalContent}>
               <View style={styles.modalHeader}>
@@ -878,7 +908,10 @@ export default function CalendarScreen() {
                   Seleccionar Rutina
                 </ThemedText>
                 <Pressable
-                  onPress={() => setIsAddModalOpen(false)}
+                  onPress={() => {
+                    setIsAddModalOpen(false);
+                    setSearchQuery('');
+                  }}
                   style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}>
                   <SymbolView
                     name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'close' }}
@@ -888,9 +921,35 @@ export default function CalendarScreen() {
                 </Pressable>
               </View>
 
+              {/* Search Bar */}
+              <View style={[styles.searchBarContainer, { backgroundColor: theme.background }]}>
+                <SymbolView
+                  name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                  size={16}
+                  tintColor={theme.textSecondary}
+                />
+                <TextInput
+                  style={[styles.searchInput, { color: theme.text }]}
+                  placeholder="Buscar rutina..."
+                  placeholderTextColor={theme.textSecondary}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  autoCapitalize="none"
+                />
+                {searchQuery.length > 0 && (
+                  <Pressable onPress={() => setSearchQuery('')}>
+                    <SymbolView
+                      name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'close' }}
+                      size={16}
+                      tintColor={theme.textSecondary}
+                    />
+                  </Pressable>
+                )}
+              </View>
+
               <ScrollView contentContainerStyle={styles.modalList}>
-                {allRoutines.length > 0 ? (
-                  allRoutines.map((routine) => (
+                {filteredRoutines.length > 0 ? (
+                  filteredRoutines.map((routine) => (
                     <Pressable
                       key={routine.id}
                       onPress={() => handleScheduleRoutine(routine.id!)}
@@ -912,7 +971,9 @@ export default function CalendarScreen() {
                     type="small"
                     themeColor="textSecondary"
                     style={styles.noRoutinesText}>
-                    No hay rutinas creadas. Agrégalas primero en el módulo de Entrenamiento.
+                    {allRoutines.length > 0
+                      ? 'No se encontraron rutinas para esta búsqueda.'
+                      : 'No hay rutinas creadas. Agrégalas primero en el módulo de Entrenamiento.'}
                   </ThemedText>
                 )}
               </ScrollView>
@@ -923,7 +984,11 @@ export default function CalendarScreen() {
       <ConfirmModal
         visible={confirmModalVisible}
         title="Quitar de la Agenda"
-        message={`¿Estás seguro de que deseas quitar "${itemToDelete?.name}" de este día?`}
+        message={
+          itemToDelete?.isCompleted
+            ? `¿Estás seguro de que deseas quitar "${itemToDelete?.name}" de este día? Esto también eliminará el historial de ejercicios completados para esta sesión.`
+            : `¿Estás seguro de que deseas quitar "${itemToDelete?.name}" de este día?`
+        }
         confirmText="Quitar"
         onConfirm={executeUnschedule}
         onCancel={() => {
@@ -1199,5 +1264,20 @@ const styles = StyleSheet.create({
     color: '#34c759',
     fontWeight: 'bold',
     fontSize: 10,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(128,128,128,0.2)',
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.two,
+    height: 44,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    height: '100%',
   },
 });

@@ -22,7 +22,9 @@ import { useAlert } from '@/components/ui/alert-provider';
 import {
   getExerciseStatsAllTime,
   getExerciseStatsForRange,
+  getExerciseProgressHistory,
   ExerciseStatItem,
+  ExerciseProgressHistoryItem,
 } from '@/database/database';
 
 type FilterType = 'all' | 'week' | 'month' | 'custom';
@@ -48,6 +50,46 @@ export default function StatisticsScreen() {
   const [stats, setStats] = useState<ExerciseStatItem[]>([]);
   const [completedRoutines, setCompletedRoutines] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Dropdown / progression chart states
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [historyData, setHistoryData] = useState<ExerciseProgressHistoryItem[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [selectedHistoryIndex, setSelectedHistoryIndex] = useState<number | null>(null);
+
+  // Reset expanded state and search query on filter change
+  useEffect(() => {
+    setExpandedKey(null);
+    setHistoryData([]);
+    setSelectedHistoryIndex(null);
+    setSearchQuery('');
+  }, [filterType, appliedRange]);
+
+  const handleToggleExpand = async (exerciseId: number | null, exerciseName: string) => {
+    const key = `${exerciseId}-${exerciseName}`;
+    if (expandedKey === key) {
+      setExpandedKey(null);
+      setHistoryData([]);
+      setSelectedHistoryIndex(null);
+    } else {
+      setExpandedKey(key);
+      setHistoryData([]);
+      setSelectedHistoryIndex(null);
+      setIsHistoryLoading(true);
+      try {
+        const hist = await getExerciseProgressHistory(db, exerciseId, exerciseName);
+        setHistoryData(hist);
+        if (hist.length > 0) {
+          setSelectedHistoryIndex(hist.length - 1);
+        }
+      } catch (err) {
+        console.error('Error fetching progress history:', err);
+      } finally {
+        setIsHistoryLoading(false);
+      }
+    }
+  };
 
   // Formatting date helper: YYYY-MM-DD
   const formatDate = (date: Date) => {
@@ -179,6 +221,10 @@ export default function StatisticsScreen() {
       end: endDateInput.trim(),
     });
   };
+
+  const filteredStats = stats.filter((item) =>
+    item.exercise_name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   // Summarize stats
   const totalReps = stats.reduce((acc, item) => acc + item.total_reps, 0);
@@ -356,56 +402,247 @@ export default function StatisticsScreen() {
               Volumen de Trabajo por Ejercicio
             </ThemedText>
 
+            {/* Search Bar */}
+            <View style={[styles.searchBarContainer, { backgroundColor: theme.backgroundElement }]}>
+              <SymbolView
+                name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                size={16}
+                tintColor={theme.textSecondary}
+              />
+              <TextInput
+                style={[styles.searchInput, { color: theme.text }]}
+                placeholder="Buscar ejercicio..."
+                placeholderTextColor={theme.textSecondary}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                autoCapitalize="none"
+              />
+              {searchQuery.length > 0 && (
+                <Pressable onPress={() => setSearchQuery('')}>
+                  <SymbolView
+                    name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'close' }}
+                    size={16}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
+              )}
+            </View>
+
             {/* List of exercise volume rankings */}
             <View style={styles.statsList}>
-              {stats.map((item, index) => {
-                const rankColor = getRankStyle(index);
-                const percentOfMax = maxReps > 0 ? (item.total_reps / maxReps) * 100 : 0;
+              {filteredStats.length > 0 ? (
+                filteredStats.map((item, index) => {
+                  const originalIndex = stats.findIndex(s => s.exercise_id === item.exercise_id && s.exercise_name === item.exercise_name);
+                  const actualIndex = originalIndex !== -1 ? originalIndex : index;
+                  const rankColor = getRankStyle(actualIndex);
+                  const percentOfMax = item.historical_max_reps > 0
+                    ? Math.min(100, (item.total_reps / item.historical_max_reps) * 100)
+                    : 0;
 
-                return (
-                  <ThemedView key={index} type="backgroundElement" style={styles.rankCard}>
-                    <View style={styles.rankCardHeader}>
-                      <View style={styles.rankCardLeft}>
-                        {/* Position badge */}
-                        <View style={[styles.rankBadge, { backgroundColor: rankColor.backgroundColor }]}>
-                          <ThemedText style={{ color: rankColor.text, fontWeight: 'bold', fontSize: 12 }}>
-                            {index + 1}°
-                          </ThemedText>
-                        </View>
-                        
-                        <View style={{ flex: 1 }}>
-                          <ThemedText type="default" style={styles.exerciseName} numberOfLines={1}>
-                            {item.exercise_name}
-                          </ThemedText>
-                          <ThemedText type="code" themeColor="textSecondary">
-                            Realizado: {item.times_done} {item.times_done === 1 ? 'vez' : 'veces'}
-                          </ThemedText>
-                        </View>
-                      </View>
+                  const key = `${item.exercise_id}-${item.exercise_name}`;
+                  const isExpanded = expandedKey === key;
 
-                      <View style={styles.rankCardRight}>
-                        <ThemedText type="subtitle" style={styles.repsText}>
-                          {item.total_reps}
-                        </ThemedText>
-                        <ThemedText type="code" themeColor="textSecondary">reps</ThemedText>
-                      </View>
-                    </View>
+                  // For chart scaling: find the maximum reps in historyData
+                  const maxHistoryReps = historyData.length > 0
+                    ? Math.max(...historyData.map(h => h.total_reps), 10)
+                    : 10;
 
-                    {/* Work Volume Progress Bar (relative comparison) */}
-                    <View style={styles.progressContainer}>
-                      <View
-                        style={[
-                          styles.progressBar,
-                          {
-                            width: `${Math.max(5, percentOfMax)}%`,
-                            backgroundColor: index === 0 ? '#FFD700' : '#3c87f7',
-                          },
+                  return (
+                    <ThemedView key={index} type="backgroundElement" style={styles.rankCard}>
+                      <Pressable
+                        onPress={() => handleToggleExpand(item.exercise_id, item.exercise_name)}
+                        style={({ pressed }) => [
+                          styles.rankCardHeaderPressable,
+                          pressed && styles.pressed,
                         ]}
-                      />
-                    </View>
-                  </ThemedView>
-                );
-              })}
+                      >
+                        <View style={styles.rankCardHeader}>
+                          <View style={styles.rankCardLeft}>
+                            {/* Position badge */}
+                            <View style={[styles.rankBadge, { backgroundColor: rankColor.backgroundColor }]}>
+                              <ThemedText style={{ color: rankColor.text, fontWeight: 'bold', fontSize: 12 }}>
+                                {actualIndex + 1}°
+                              </ThemedText>
+                            </View>
+                            
+                            <View style={{ flex: 1 }}>
+                              <ThemedText type="default" style={styles.exerciseName} numberOfLines={1}>
+                                {item.exercise_name}
+                              </ThemedText>
+                              <ThemedText type="code" themeColor="textSecondary">
+                                Rango: {item.times_done} {item.times_done === 1 ? 'vez' : 'veces'} | Máx: {item.historical_max_reps} reps
+                              </ThemedText>
+                            </View>
+                          </View>
+
+                          <View style={styles.rankCardRightRow}>
+                            <View style={styles.rankCardRight}>
+                              <ThemedText type="subtitle" style={styles.repsText}>
+                                {item.total_reps}
+                              </ThemedText>
+                              <ThemedText type="code" themeColor="textSecondary">reps</ThemedText>
+                            </View>
+                            <SymbolView
+                              name={isExpanded ? { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' } : { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
+                              size={18}
+                              tintColor={theme.textSecondary}
+                              style={{ marginLeft: Spacing.two }}
+                            />
+                          </View>
+                        </View>
+
+                        {/* Work Volume Progress Bar (relative comparison) */}
+                        <View style={styles.progressContainer}>
+                          <View
+                            style={[
+                              styles.progressBar,
+                              {
+                                width: `${Math.max(5, percentOfMax)}%`,
+                                backgroundColor: actualIndex === 0 ? '#FFD700' : '#3c87f7',
+                              },
+                            ]}
+                          />
+                        </View>
+                      </Pressable>
+
+                      {/* Collapsible area for progression chart */}
+                      {isExpanded && (
+                        <View style={styles.expandedContent}>
+                          <ThemedText type="smallBold" style={styles.chartTitle}>
+                            Progreso de Repeticiones por Rutina
+                          </ThemedText>
+                          
+                          {isHistoryLoading ? (
+                            <View style={styles.chartLoadingContainer}>
+                              <ActivityIndicator size="small" color="#3c87f7" />
+                              <ThemedText type="code" themeColor="textSecondary" style={{ marginTop: Spacing.one }}>
+                                Cargando historial...
+                              </ThemedText>
+                            </View>
+                          ) : historyData.length === 0 ? (
+                            <View style={styles.chartEmptyContainer}>
+                              <ThemedText type="code" themeColor="textSecondary">
+                                No hay suficientes datos de entrenamiento para este ejercicio.
+                              </ThemedText>
+                            </View>
+                          ) : (
+                            <View style={styles.chartWrapper}>
+                              {/* Chart Area */}
+                              <View style={[styles.chartContainer, { backgroundColor: theme.background }]}>
+                                {/* Background Grid Lines */}
+                                <View style={styles.gridContainer}>
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
+                                </View>
+
+                                <ScrollView
+                                  horizontal
+                                  showsHorizontalScrollIndicator={false}
+                                  contentContainerStyle={styles.chartScrollContent}
+                                >
+                                  {historyData.map((histItem, idx) => {
+                                    const isSelected = selectedHistoryIndex === idx;
+                                    const barHeight = maxHistoryReps > 0 ? (histItem.total_reps / maxHistoryReps) * 100 : 0;
+                                    
+                                    // Format YYYY-MM-DD to DD/MM
+                                    const dateParts = histItem.completed_date.split('-');
+                                    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : histItem.completed_date;
+
+                                    return (
+                                      <Pressable
+                                        key={idx}
+                                        onPress={() => setSelectedHistoryIndex(idx)}
+                                        style={styles.chartBarWrapper}
+                                      >
+                                        <ThemedText
+                                          type="code"
+                                          style={[
+                                            styles.chartBarRepsLabel,
+                                            { color: isSelected ? '#3c87f7' : theme.textSecondary }
+                                          ]}
+                                        >
+                                          {histItem.total_reps}
+                                        </ThemedText>
+
+                                        <View style={styles.chartBarTrack}>
+                                          <View
+                                            style={[
+                                              styles.chartBarFill,
+                                              {
+                                                height: `${Math.max(5, barHeight)}%`,
+                                                backgroundColor: isSelected ? '#3c87f7' : '#5ba2f4',
+                                                opacity: isSelected ? 1 : 0.6,
+                                              }
+                                            ]}
+                                          />
+                                        </View>
+
+                                        <ThemedText
+                                          type="code"
+                                          style={[
+                                            styles.chartBarDateLabel,
+                                            { color: isSelected ? theme.text : theme.textSecondary, fontWeight: isSelected ? 'bold' : 'normal' }
+                                          ]}
+                                        >
+                                          {formattedDate}
+                                        </ThemedText>
+                                      </Pressable>
+                                    );
+                                  })}
+                                </ScrollView>
+                              </View>
+
+                              {/* Detail Panel */}
+                              {selectedHistoryIndex !== null && historyData[selectedHistoryIndex] && (
+                                <View style={[styles.detailBox, { backgroundColor: theme.backgroundSelected }]}>
+                                  <View style={styles.detailRow}>
+                                    <SymbolView
+                                      name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
+                                      size={14}
+                                      tintColor={theme.textSecondary}
+                                    />
+                                    <ThemedText type="smallBold" style={{ marginLeft: Spacing.one }}>
+                                      {historyData[selectedHistoryIndex].completed_date}
+                                    </ThemedText>
+                                  </View>
+                                  <View style={styles.detailRow}>
+                                    <SymbolView
+                                      name={{ ios: 'dumbbell', android: 'fitness_center', web: 'fitness_center' }}
+                                      size={14}
+                                      tintColor={theme.textSecondary}
+                                    />
+                                    <ThemedText type="small" style={{ marginLeft: Spacing.one, flex: 1 }} numberOfLines={1}>
+                                      Rutina: {historyData[selectedHistoryIndex].routine_name}
+                                    </ThemedText>
+                                  </View>
+                                  <View style={styles.detailRow}>
+                                    <SymbolView
+                                      name={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
+                                      size={14}
+                                      tintColor="#3c87f7"
+                                    />
+                                    <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#3c87f7' }}>
+                                      Volumen: {historyData[selectedHistoryIndex].total_reps} repeticiones totales
+                                    </ThemedText>
+                                  </View>
+                                </View>
+                              )}
+                            </View>
+                          )}
+                        </View>
+                      )}
+                    </ThemedView>
+                  );
+                })
+              ) : (
+                <ThemedText
+                  type="small"
+                  themeColor="textSecondary"
+                  style={styles.noExercisesText}>
+                  No se encontraron ejercicios para esta búsqueda.
+                </ThemedText>
+              )}
             </View>
           </ScrollView>
         )}
@@ -536,8 +773,11 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   rankCard: {
-    padding: Spacing.three,
     borderRadius: Spacing.three,
+    overflow: 'hidden',
+  },
+  rankCardHeaderPressable: {
+    padding: Spacing.three,
     gap: Spacing.two,
   },
   rankCardHeader: {
@@ -562,6 +802,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
+  rankCardRightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   rankCardRight: {
     alignItems: 'flex-end',
   },
@@ -583,5 +827,112 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.8,
+  },
+  expandedContent: {
+    paddingHorizontal: Spacing.three,
+    paddingBottom: Spacing.three,
+    gap: Spacing.two,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.05)',
+    paddingTop: Spacing.two,
+  },
+  chartTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: Spacing.one,
+  },
+  chartLoadingContainer: {
+    height: 140,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chartEmptyContainer: {
+    height: 140,
+    justifyContent: 'center',
+    alignItems: 'center',
+    opacity: 0.7,
+  },
+  chartWrapper: {
+    gap: Spacing.two,
+  },
+  chartContainer: {
+    height: 140,
+    borderRadius: Spacing.two,
+    position: 'relative',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.05)',
+  },
+  gridContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 20,
+    bottom: 24,
+    justifyContent: 'space-between',
+  },
+  gridLine: {
+    borderBottomWidth: 1,
+    borderStyle: 'dashed',
+    opacity: 0.1,
+  },
+  chartScrollContent: {
+    alignItems: 'flex-end',
+    paddingHorizontal: Spacing.two,
+    paddingBottom: Spacing.one,
+    gap: Spacing.three,
+  },
+  chartBarWrapper: {
+    alignItems: 'center',
+    gap: Spacing.one,
+    width: 36,
+  },
+  chartBarRepsLabel: {
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  chartBarTrack: {
+    height: 75,
+    width: 14,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.03)',
+    borderRadius: 7,
+    overflow: 'hidden',
+  },
+  chartBarFill: {
+    width: '100%',
+    borderRadius: 7,
+  },
+  chartBarDateLabel: {
+    fontSize: 9,
+  },
+  detailBox: {
+    padding: Spacing.two,
+    borderRadius: Spacing.two,
+    gap: Spacing.one,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(128,128,128,0.2)',
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.two,
+    height: 44,
+    marginBottom: Spacing.two,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    height: '100%',
+  },
+  noExercisesText: {
+    textAlign: 'center',
+    paddingVertical: Spacing.four,
   },
 });

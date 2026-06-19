@@ -51,6 +51,7 @@ export interface ExerciseCompletionAudit {
   routine_name: string;
   completed_date: string; // YYYY-MM-DD
   group_name?: string | null;
+  meta_group_item_id?: number | null;
   created_at?: string;
 }
 
@@ -59,6 +60,7 @@ export interface ExerciseStatItem {
   exercise_name: string;
   total_reps: number;
   times_done: number;
+  historical_max_reps: number;
 }
 
 // Database version control and migrations
@@ -147,6 +149,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           routine_name TEXT NOT NULL,
           completed_date TEXT NOT NULL,
           group_name TEXT,
+          meta_group_item_id INTEGER,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -208,6 +211,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
             routine_name TEXT NOT NULL,
             completed_date TEXT NOT NULL,
             group_name TEXT,
+            meta_group_item_id INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
       `);
@@ -217,6 +221,11 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
     // Ensure group_name column exists in exercise_completion_audits table
     if (auditsColumns.length > 0 && !auditsColumns.includes('group_name')) {
       await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN group_name TEXT;');
+    }
+
+    // Ensure meta_group_item_id column exists in exercise_completion_audits table
+    if (auditsColumns.length > 0 && !auditsColumns.includes('meta_group_item_id')) {
+      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN meta_group_item_id INTEGER;');
     }
 
     // Ensure meta_group_items has surrogate id instead of composite primary key
@@ -487,8 +496,30 @@ export async function insertScheduledRoutine(
   return result.lastInsertRowId;
 }
 
-export async function deleteScheduledRoutine(db: SQLiteDatabase, id: number): Promise<void> {
-  await db.runAsync('DELETE FROM scheduled_routines WHERE id = ?', [id]);
+export async function deleteScheduledRoutine(
+  db: SQLiteDatabase,
+  id: number,
+  metaGroupId: number,
+  date: string
+): Promise<void> {
+  await db.withTransactionAsync(async () => {
+    if (id > 0) {
+      await db.runAsync('DELETE FROM scheduled_routines WHERE id = ?', [id]);
+    } else {
+      await db.runAsync(
+        'DELETE FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ?',
+        [metaGroupId, date]
+      );
+    }
+    await db.runAsync(
+      'DELETE FROM exercise_completion_audits WHERE routine_id = ? AND completed_date = ?',
+      [metaGroupId, date]
+    );
+    await db.runAsync(
+      'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
+      [metaGroupId, date]
+    );
+  });
 }
 
 // ==========================================
@@ -501,8 +532,8 @@ export async function insertExerciseCompletionAudit(
 ): Promise<number> {
   const result = await db.runAsync(
     `INSERT INTO exercise_completion_audits 
-     (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name) 
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       audit.exercise_id,
       audit.exercise_name,
@@ -513,6 +544,7 @@ export async function insertExerciseCompletionAudit(
       audit.routine_name,
       audit.completed_date,
       audit.group_name ?? null,
+      audit.meta_group_item_id ?? null,
     ]
   );
   return result.lastInsertRowId;
@@ -521,12 +553,22 @@ export async function insertExerciseCompletionAudit(
 export async function getExerciseStatsAllTime(db: SQLiteDatabase): Promise<ExerciseStatItem[]> {
   return await db.getAllAsync<ExerciseStatItem>(
     `SELECT 
-       exercise_id,
-       exercise_name,
-       SUM(repetitions) as total_reps,
-       COUNT(DISTINCT completed_date || '-' || routine_id) as times_done
-     FROM exercise_completion_audits
-     GROUP BY exercise_id, exercise_name
+       a.exercise_id,
+       a.exercise_name,
+       SUM(a.repetitions) as total_reps,
+       COUNT(DISTINCT a.completed_date || '-' || a.routine_id) as times_done,
+       COALESCE(m.historical_max_reps, 0) as historical_max_reps
+     FROM exercise_completion_audits a
+     LEFT JOIN (
+       SELECT exercise_id, MAX(routine_reps) as historical_max_reps
+       FROM (
+         SELECT exercise_id, SUM(repetitions) as routine_reps
+         FROM exercise_completion_audits
+         GROUP BY exercise_id, completed_date, routine_id
+       )
+       GROUP BY exercise_id
+     ) m ON a.exercise_id = m.exercise_id
+     GROUP BY a.exercise_id, a.exercise_name
      ORDER BY total_reps DESC`
   );
 }
@@ -538,14 +580,63 @@ export async function getExerciseStatsForRange(
 ): Promise<ExerciseStatItem[]> {
   return await db.getAllAsync<ExerciseStatItem>(
     `SELECT 
-       exercise_id,
-       exercise_name,
-       SUM(repetitions) as total_reps,
-       COUNT(DISTINCT completed_date || '-' || routine_id) as times_done
-     FROM exercise_completion_audits
-     WHERE completed_date BETWEEN ? AND ?
-     GROUP BY exercise_id, exercise_name
+       a.exercise_id,
+       a.exercise_name,
+       SUM(a.repetitions) as total_reps,
+       COUNT(DISTINCT a.completed_date || '-' || a.routine_id) as times_done,
+       COALESCE(m.historical_max_reps, 0) as historical_max_reps
+     FROM exercise_completion_audits a
+     LEFT JOIN (
+       SELECT exercise_id, MAX(routine_reps) as historical_max_reps
+       FROM (
+         SELECT exercise_id, SUM(repetitions) as routine_reps
+         FROM exercise_completion_audits
+         GROUP BY exercise_id, completed_date, routine_id
+       )
+       GROUP BY exercise_id
+     ) m ON a.exercise_id = m.exercise_id
+     WHERE a.completed_date BETWEEN ? AND ?
+     GROUP BY a.exercise_id, a.exercise_name
      ORDER BY total_reps DESC`,
     [startDate, endDate]
   );
 }
+
+export interface ExerciseProgressHistoryItem {
+  completed_date: string;
+  total_reps: number;
+  routine_name: string;
+}
+
+export async function getExerciseProgressHistory(
+  db: SQLiteDatabase,
+  exerciseId: number | null,
+  exerciseName: string
+): Promise<ExerciseProgressHistoryItem[]> {
+  if (exerciseId !== null) {
+    return await db.getAllAsync<ExerciseProgressHistoryItem>(
+      `SELECT 
+         completed_date,
+         SUM(repetitions) as total_reps,
+         routine_name
+       FROM exercise_completion_audits
+       WHERE exercise_id = ? OR exercise_name = ?
+       GROUP BY completed_date, routine_id
+       ORDER BY completed_date ASC`,
+      [exerciseId, exerciseName]
+    );
+  } else {
+    return await db.getAllAsync<ExerciseProgressHistoryItem>(
+      `SELECT 
+         completed_date,
+         SUM(repetitions) as total_reps,
+         routine_name
+       FROM exercise_completion_audits
+       WHERE exercise_name = ?
+       GROUP BY completed_date, routine_id
+       ORDER BY completed_date ASC`,
+      [exerciseName]
+    );
+  }
+}
+
