@@ -27,6 +27,7 @@ import {
   InitialStateConfig,
 } from '@/database/database';
 import { useAlert } from '@/components/ui/alert-provider';
+import { MUSCLE_ZONES, MuscleIntensity, getMuscleName } from '@/constants/muscle-groups';
 
 export default function CreateExerciseScreen() {
   const db = useSQLiteContext();
@@ -47,7 +48,9 @@ export default function CreateExerciseScreen() {
     { set: 3, reps: 10 },
   ]);
   const [videoUrl, setVideoUrl] = useState('');
+  const [selectedMuscles, setSelectedMuscles] = useState<{ muscle_id: string; intensity: MuscleIntensity }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [showIntensityInfo, setShowIntensityInfo] = useState(false);
 
   // Load existing exercise details if editing
   useEffect(() => {
@@ -65,6 +68,7 @@ export default function CreateExerciseScreen() {
           setDefaultReps(exercise.default_reps);
           setIsConstant(exercise.is_constant === 1);
           setVideoUrl(exercise.video_url || '');
+          setSelectedMuscles(exercise.muscles || []);
 
           if (exercise.is_constant === 0 && exercise.series_config) {
             try {
@@ -136,6 +140,15 @@ export default function CreateExerciseScreen() {
     const seriesConfigStr = !isConstant ? JSON.stringify(variableSets) : null;
     const initialStateStr = null;
 
+    const primaryMuscles = selectedMuscles.filter(m => m.intensity === 'primary');
+    const mainMuscleId = primaryMuscles.length > 0 ? primaryMuscles[0].muscle_id : (selectedMuscles.length > 0 ? selectedMuscles[0].muscle_id : null);
+    
+    let mainZoneName: string | null = null;
+    if (mainMuscleId) {
+      const zone = MUSCLE_ZONES.find(z => z.muscles.some(m => m.id === mainMuscleId));
+      mainZoneName = zone ? zone.zone : null;
+    }
+
     const exerciseData: Omit<Exercise, 'id' | 'created_at'> = {
       name: name.trim(),
       default_sets: defaultSets,
@@ -144,6 +157,8 @@ export default function CreateExerciseScreen() {
       series_config: seriesConfigStr,
       video_url: videoUrl.trim() || null,
       initial_state: initialStateStr,
+      muscle_group: mainZoneName,
+      muscles: selectedMuscles,
     };
 
     try {
@@ -210,6 +225,183 @@ export default function CreateExerciseScreen() {
                 onChangeText={setName}
                 editable={!isLoading}
               />
+            </View>
+
+            {/* Muscle Group Selection */}
+            <View style={styles.formGroup}>
+              <ThemedText type="smallBold" themeColor="textSecondary" style={styles.sectionTitle}>
+                Músculos Involucrados e Intensidad
+              </ThemedText>
+              <ThemedText type="small" themeColor="textSecondary" style={{ marginBottom: Spacing.two }}>
+                Selecciona los músculos que trabaja este ejercicio y define su nivel: Primario (P), Secundario (S) o Estabilizador (E).
+              </ThemedText>
+
+              <Pressable
+                onPress={() => setShowIntensityInfo(!showIntensityInfo)}
+                style={({ pressed }) => [
+                  styles.infoToggleBtn,
+                  pressed && styles.pressed,
+                ]}>
+                <SymbolView
+                  name={{ ios: 'info.circle.fill', android: 'info', web: 'info' }}
+                  size={16}
+                  tintColor="#3c87f7"
+                />
+                <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: 'bold' }}>
+                  ¿Qué significa Primario, Secundario o Estabilizador?
+                </ThemedText>
+                <SymbolView
+                  name={showIntensityInfo ? { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' } : { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
+                  size={16}
+                  tintColor="#3c87f7"
+                />
+              </Pressable>
+
+              {showIntensityInfo && (
+                <View style={[styles.infoCard, { backgroundColor: theme.backgroundSelected }]}>
+                  <View style={styles.infoCardRow}>
+                    <View style={[styles.intensityBadge, { backgroundColor: '#3c87f7' }]}>
+                      <ThemedText type="code" style={styles.intensityBadgeText}>P</ThemedText>
+                    </View>
+                    <View style={styles.infoCardTextContainer}>
+                      <ThemedText type="smallBold">Primario (Motor Principal)</ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        El músculo que realiza la mayor parte del esfuerzo durante el ejercicio y es el objetivo principal del entrenamiento.
+                      </ThemedText>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoCardRow}>
+                    <View style={[styles.intensityBadge, { backgroundColor: '#34c759' }]}>
+                      <ThemedText type="code" style={styles.intensityBadgeText}>S</ThemedText>
+                    </View>
+                    <View style={styles.infoCardTextContainer}>
+                      <ThemedText type="smallBold">Secundario (Sinergista)</ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        Músculos que ayudan de manera activa a realizar el movimiento, asistiendo al músculo primario.
+                      </ThemedText>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoCardRow}>
+                    <View style={[styles.intensityBadge, { backgroundColor: '#ff9500' }]}>
+                      <ThemedText type="code" style={styles.intensityBadgeText}>E</ThemedText>
+                    </View>
+                    <View style={styles.infoCardTextContainer}>
+                      <ThemedText type="smallBold">Estabilizador (Fijador)</ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        Músculos que se contraen para mantener una postura firme y equilibrada, protegiendo las articulaciones sin realizar el movimiento principal.
+                      </ThemedText>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {MUSCLE_ZONES.map((zone) => (
+                <View key={zone.zone} style={styles.zoneGroup}>
+                  <ThemedText type="smallBold" style={styles.zoneHeader}>
+                    {zone.zone}
+                  </ThemedText>
+                  <View style={styles.musclesGrid}>
+                    {zone.muscles.map((muscle) => {
+                      const existing = selectedMuscles.find((m) => m.muscle_id === muscle.id);
+                      const isSelected = !!existing;
+                      const intensity = existing?.intensity;
+
+                      const handleIntensitySelect = (level: MuscleIntensity) => {
+                        setSelectedMuscles((prev) => {
+                          const filtered = prev.filter((m) => m.muscle_id !== muscle.id);
+                          return [...filtered, { muscle_id: muscle.id, intensity: level }];
+                        });
+                      };
+
+                      const handleToggleMuscle = () => {
+                        if (isSelected) {
+                          setSelectedMuscles((prev) => prev.filter((m) => m.muscle_id !== muscle.id));
+                        } else {
+                          setSelectedMuscles((prev) => [...prev, { muscle_id: muscle.id, intensity: 'primary' }]);
+                        }
+                      };
+
+                      return (
+                        <View
+                          key={muscle.id}
+                          style={[
+                            styles.muscleItemRow,
+                            { backgroundColor: theme.backgroundElement },
+                            isSelected && styles.muscleItemRowActive,
+                          ]}>
+                          <Pressable
+                            onPress={handleToggleMuscle}
+                            style={styles.muscleItemLeft}>
+                            <SymbolView
+                              name={
+                                isSelected
+                                  ? { ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }
+                                  : { ios: 'circle', android: 'radio_button_unchecked', web: 'radio_button_unchecked' }
+                              }
+                              size={20}
+                              tintColor={
+                                isSelected
+                                  ? intensity === 'primary'
+                                    ? '#3c87f7'
+                                    : intensity === 'secondary'
+                                    ? '#34c759'
+                                    : '#ff9500'
+                                  : theme.textSecondary
+                              }
+                            />
+                            <ThemedText
+                              type="small"
+                              style={[
+                                styles.muscleNameLabel,
+                                isSelected && { color: theme.text, fontWeight: 'bold' },
+                              ]}>
+                              {muscle.name}
+                            </ThemedText>
+                          </Pressable>
+
+                          {isSelected && (
+                            <View style={styles.intensitySelector}>
+                              {(['primary', 'secondary', 'stabilizer'] as MuscleIntensity[]).map((level) => {
+                                const isActive = intensity === level;
+                                const labels: Record<MuscleIntensity, string> = {
+                                  primary: 'P',
+                                  secondary: 'S',
+                                  stabilizer: 'E',
+                                };
+                                const colors: Record<MuscleIntensity, string> = {
+                                  primary: '#3c87f7',
+                                  secondary: '#34c759',
+                                  stabilizer: '#ff9500',
+                                };
+                                return (
+                                  <Pressable
+                                    key={level}
+                                    onPress={() => handleIntensitySelect(level)}
+                                    style={[
+                                      styles.intensityButton,
+                                      isActive && { backgroundColor: colors[level] },
+                                    ]}>
+                                    <ThemedText
+                                      type="code"
+                                      style={[
+                                        styles.intensityButtonText,
+                                        isActive && { color: '#ffffff', fontWeight: 'bold' },
+                                      ]}>
+                                      {labels[level]}
+                                    </ThemedText>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ))}
             </View>
 
             {/* Video URL */}
@@ -502,5 +694,89 @@ const styles = StyleSheet.create({
   },
   bottomSpacer: {
     height: Spacing.five,
+  },
+  zoneGroup: {
+    marginBottom: Spacing.three,
+    gap: Spacing.one,
+  },
+  zoneHeader: {
+    fontSize: 14,
+    opacity: 0.8,
+    marginBottom: Spacing.half,
+  },
+  musclesGrid: {
+    gap: Spacing.one,
+  },
+  muscleItemRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    borderRadius: Spacing.two,
+  },
+  muscleItemRowActive: {
+    borderWidth: 1,
+    borderColor: 'rgba(128,128,128,0.15)',
+  },
+  muscleItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    flex: 1,
+    paddingVertical: Spacing.half,
+  },
+  muscleNameLabel: {
+    fontSize: 14,
+  },
+  intensitySelector: {
+    flexDirection: 'row',
+    gap: Spacing.one,
+  },
+  intensityButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(128,128,128,0.1)',
+  },
+  intensityButtonText: {
+    fontSize: 11,
+    color: '#8e8e93',
+  },
+  infoToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.one,
+    alignSelf: 'flex-start',
+  },
+  infoCard: {
+    padding: Spacing.three,
+    borderRadius: Spacing.two,
+    gap: Spacing.three,
+    marginBottom: Spacing.two,
+  },
+  infoCardRow: {
+    flexDirection: 'row',
+    gap: Spacing.three,
+    alignItems: 'flex-start',
+  },
+  infoCardTextContainer: {
+    flex: 1,
+    gap: Spacing.half,
+  },
+  intensityBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  intensityBadgeText: {
+    color: '#ffffff',
+    fontWeight: 'bold',
   },
 });

@@ -1,4 +1,5 @@
 import { SQLiteDatabase } from 'expo-sqlite';
+import { MuscleIntensity } from '@/constants/muscle-groups';
 
 export interface SeriesConfigItem {
   set: number;
@@ -20,6 +21,8 @@ export interface Exercise {
   series_config: string | null; // serialized JSON array of SeriesConfigItem
   video_url: string | null;
   initial_state: string | null; // serialized JSON of InitialStateConfig
+  muscle_group?: string | null;
+  muscles?: { muscle_id: string; intensity: MuscleIntensity }[];
   created_at?: string;
   repsDisplay?: string;
   isAudit?: boolean;
@@ -81,6 +84,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           series_config TEXT,
           video_url TEXT,
           initial_state TEXT,
+          muscle_group TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -153,6 +157,14 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS exercise_muscles (
+          exercise_id INTEGER,
+          muscle_id TEXT NOT NULL,
+          intensity TEXT NOT NULL,
+          PRIMARY KEY (exercise_id, muscle_id),
+          FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);
     `);
 
@@ -168,6 +180,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
         { name: 'series_config', type: 'TEXT' },
         { name: 'video_url', type: 'TEXT' },
         { name: 'initial_state', type: 'TEXT' },
+        { name: 'muscle_group', type: 'TEXT' },
         { name: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
       ];
       for (const col of expectedColumns) {
@@ -270,31 +283,63 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
 // ==========================================
 
 export async function getExercises(db: SQLiteDatabase): Promise<Exercise[]> {
-  return await db.getAllAsync<Exercise>('SELECT * FROM exercises ORDER BY name ASC');
+  const exercises = await db.getAllAsync<Exercise>('SELECT * FROM exercises ORDER BY name ASC');
+  for (const ex of exercises) {
+    if (ex.id) {
+      const muscles = await db.getAllAsync<{ muscle_id: string; intensity: MuscleIntensity }>(
+        'SELECT muscle_id, intensity FROM exercise_muscles WHERE exercise_id = ?',
+        [ex.id]
+      );
+      ex.muscles = muscles;
+    }
+  }
+  return exercises;
 }
 
 export async function getExerciseById(db: SQLiteDatabase, id: number): Promise<Exercise | null> {
-  return await db.getFirstAsync<Exercise>('SELECT * FROM exercises WHERE id = ?', [id]);
+  const exercise = await db.getFirstAsync<Exercise>('SELECT * FROM exercises WHERE id = ?', [id]);
+  if (exercise && exercise.id) {
+    const muscles = await db.getAllAsync<{ muscle_id: string; intensity: MuscleIntensity }>(
+      'SELECT muscle_id, intensity FROM exercise_muscles WHERE exercise_id = ?',
+      [exercise.id]
+    );
+    exercise.muscles = muscles;
+  }
+  return exercise;
 }
 
 export async function insertExercise(
   db: SQLiteDatabase,
   exercise: Omit<Exercise, 'id' | 'created_at'>
 ): Promise<number> {
-  const result = await db.runAsync(
-    `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state) 
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      exercise.name,
-      exercise.default_sets,
-      exercise.default_reps,
-      exercise.is_constant,
-      exercise.series_config,
-      exercise.video_url,
-      exercise.initial_state,
-    ]
-  );
-  return result.lastInsertRowId;
+  let lastInsertRowId = 0;
+  await db.withTransactionAsync(async () => {
+    const result = await db.runAsync(
+      `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        exercise.name,
+        exercise.default_sets,
+        exercise.default_reps,
+        exercise.is_constant,
+        exercise.series_config,
+        exercise.video_url,
+        exercise.initial_state,
+        exercise.muscle_group ?? null,
+      ]
+    );
+    lastInsertRowId = result.lastInsertRowId;
+
+    if (exercise.muscles && exercise.muscles.length > 0) {
+      for (const m of exercise.muscles) {
+        await db.runAsync(
+          'INSERT INTO exercise_muscles (exercise_id, muscle_id, intensity) VALUES (?, ?, ?)',
+          [lastInsertRowId, m.muscle_id, m.intensity]
+        );
+      }
+    }
+  });
+  return lastInsertRowId;
 }
 
 export async function updateExercise(
@@ -302,27 +347,43 @@ export async function updateExercise(
   id: number,
   exercise: Partial<Omit<Exercise, 'id' | 'created_at'>>
 ): Promise<void> {
-  await db.runAsync(
-    `UPDATE exercises SET 
-      name = COALESCE(?, name),
-      default_sets = COALESCE(?, default_sets),
-      default_reps = COALESCE(?, default_reps),
-      is_constant = COALESCE(?, is_constant),
-      series_config = COALESCE(?, series_config),
-      video_url = COALESCE(?, video_url),
-      initial_state = COALESCE(?, initial_state)
-     WHERE id = ?`,
-    [
-      exercise.name ?? null,
-      exercise.default_sets ?? null,
-      exercise.default_reps ?? null,
-      exercise.is_constant ?? null,
-      exercise.series_config ?? null,
-      exercise.video_url ?? null,
-      exercise.initial_state ?? null,
-      id,
-    ]
-  );
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `UPDATE exercises SET 
+        name = COALESCE(?, name),
+        default_sets = COALESCE(?, default_sets),
+        default_reps = COALESCE(?, default_reps),
+        is_constant = COALESCE(?, is_constant),
+        series_config = COALESCE(?, series_config),
+        video_url = COALESCE(?, video_url),
+        initial_state = COALESCE(?, initial_state),
+        muscle_group = COALESCE(?, muscle_group)
+       WHERE id = ?`,
+      [
+        exercise.name ?? null,
+        exercise.default_sets ?? null,
+        exercise.default_reps ?? null,
+        exercise.is_constant ?? null,
+        exercise.series_config ?? null,
+        exercise.video_url ?? null,
+        exercise.initial_state ?? null,
+        exercise.muscle_group ?? null,
+        id,
+      ]
+    );
+
+    if (exercise.muscles !== undefined) {
+      await db.runAsync('DELETE FROM exercise_muscles WHERE exercise_id = ?', [id]);
+      if (exercise.muscles && exercise.muscles.length > 0) {
+        for (const m of exercise.muscles) {
+          await db.runAsync(
+            'INSERT INTO exercise_muscles (exercise_id, muscle_id, intensity) VALUES (?, ?, ?)',
+            [id, m.muscle_id, m.intensity]
+          );
+        }
+      }
+    }
+  });
 }
 
 export async function deleteExercise(db: SQLiteDatabase, id: number): Promise<void> {
@@ -348,6 +409,15 @@ export async function getGroupWithExercises(db: SQLiteDatabase, groupId: number)
      ORDER BY ge.order_index ASC`,
     [groupId]
   );
+  for (const ex of exercises) {
+    if (ex.id) {
+      const muscles = await db.getAllAsync<{ muscle_id: string; intensity: MuscleIntensity }>(
+        'SELECT muscle_id, intensity FROM exercise_muscles WHERE exercise_id = ?',
+        [ex.id]
+      );
+      ex.muscles = muscles;
+    }
+  }
   return { ...group, exercises };
 }
 

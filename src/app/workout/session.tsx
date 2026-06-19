@@ -18,8 +18,9 @@ import { SymbolView } from 'expo-symbols';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Spacing } from '@/constants/theme';
+import { Colors, Spacing, BottomTabInset, MaxContentWidth } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { getMuscleName, MuscleIntensity } from '@/constants/muscle-groups';
 import {
   getMetaGroupWithGroups,
   getGroupWithExercises,
@@ -910,10 +911,58 @@ export default function WorkoutSessionScreen() {
                 {/* Exercise Info Card */}
                 <ThemedView type="backgroundElement" style={styles.exerciseCard}>
                   <View style={styles.cardHeader}>
-                    <View style={styles.muscleBadge}>
-                      <ThemedText type="code" style={{ color: '#3c87f7', fontWeight: 'bold' }}>
-                        GRUPO: {activeSessionItem.groupName.toUpperCase()}
-                      </ThemedText>
+                    <View style={styles.badgeRow}>
+                      <View style={styles.muscleBadge}>
+                        <ThemedText type="code" style={{ color: '#3c87f7', fontWeight: 'bold' }}>
+                          GRUPO: {activeSessionItem.groupName.toUpperCase()}
+                        </ThemedText>
+                      </View>
+                      {(() => {
+                        if (activeExercise.muscles && activeExercise.muscles.length > 0) {
+                          const intensityOrder: Record<MuscleIntensity, number> = {
+                            primary: 1,
+                            secondary: 2,
+                            stabilizer: 3,
+                          };
+                          const sortedMuscles = [...activeExercise.muscles].sort(
+                            (a, b) => intensityOrder[a.intensity] - intensityOrder[b.intensity]
+                          );
+
+                          return sortedMuscles.map((m) => {
+                            const muscleName = getMuscleName(m.muscle_id);
+                            const badgeColor: Record<MuscleIntensity, { bg: string; text: string }> = {
+                              primary: { bg: 'rgba(60, 135, 247, 0.12)', text: '#3c87f7' },
+                              secondary: { bg: 'rgba(52, 199, 89, 0.12)', text: '#34c759' },
+                              stabilizer: { bg: 'rgba(255, 149, 0, 0.12)', text: '#ff9500' },
+                            };
+                            const colors = badgeColor[m.intensity] || badgeColor.primary;
+                            const prefix: Record<MuscleIntensity, string> = {
+                              primary: 'P',
+                              secondary: 'S',
+                              stabilizer: 'E',
+                            };
+
+                            return (
+                              <View
+                                key={m.muscle_id}
+                                style={[styles.muscleBadge, { backgroundColor: colors.bg }]}>
+                                <ThemedText type="code" style={{ color: colors.text, fontWeight: 'bold' }}>
+                                  {prefix[m.intensity]}: {muscleName.toUpperCase()}
+                                </ThemedText>
+                              </View>
+                            );
+                          });
+                        } else if (activeExercise.muscle_group) {
+                          return (
+                            <View style={[styles.muscleBadge, { backgroundColor: 'rgba(52, 199, 89, 0.12)' }]}>
+                              <ThemedText type="code" style={{ color: '#34c759', fontWeight: 'bold' }}>
+                                MÚSCULO: {activeExercise.muscle_group.toUpperCase()}
+                              </ThemedText>
+                            </View>
+                          );
+                        }
+                        return null;
+                      })()}
                     </View>
                     {activeExercise.video_url && (
                       <Pressable
@@ -1547,6 +1596,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+    flex: 1,
+    marginRight: Spacing.two,
   },
   muscleBadge: {
     backgroundColor: 'rgba(60, 135, 247, 0.12)',

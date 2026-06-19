@@ -17,6 +17,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getExercises, deleteExercise, Exercise } from '@/database/database';
 import { openExerciseVideo } from '@/utils/linking';
+import { getMuscleName } from '@/constants/muscle-groups';
 import { ConfirmModal } from '@/components/ui/confirm-modal';
 import { useAlert } from '@/components/ui/alert-provider';
 
@@ -86,9 +87,34 @@ export function ExercisesView() {
       <ThemedView type="backgroundElement" style={styles.card}>
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleContainer}>
-            <ThemedText type="smallBold" style={styles.exerciseName}>
-              {item.name}
-            </ThemedText>
+            <View style={styles.exerciseNameRow}>
+              <ThemedText type="smallBold" style={styles.exerciseName}>
+                {item.name}
+              </ThemedText>
+              {(() => {
+                const primaryMuscles = item.muscles?.filter((m) => m.intensity === 'primary');
+                if (primaryMuscles && primaryMuscles.length > 0) {
+                  const mainMuscleName = getMuscleName(primaryMuscles[0].muscle_id);
+                  const countLabel = primaryMuscles.length > 1 ? ` +${primaryMuscles.length - 1}` : '';
+                  return (
+                    <View style={[styles.muscleBadgeSmall, { backgroundColor: theme.backgroundSelected }]}>
+                      <ThemedText type="code" style={{ fontSize: 10, color: '#3c87f7', fontWeight: 'bold' }}>
+                        {`${mainMuscleName.toUpperCase()}${countLabel}`}
+                      </ThemedText>
+                    </View>
+                  );
+                } else if (item.muscle_group) {
+                  return (
+                    <View style={[styles.muscleBadgeSmall, { backgroundColor: theme.backgroundSelected }]}>
+                      <ThemedText type="code" style={{ fontSize: 10, color: '#3c87f7', fontWeight: 'bold' }}>
+                        {item.muscle_group.toUpperCase()}
+                      </ThemedText>
+                    </View>
+                  );
+                }
+                return null;
+              })()}
+            </View>
             <ThemedText type="small" themeColor="textSecondary">
               {isConstant
                 ? `${item.default_sets} series x ${item.default_reps} reps`
@@ -313,5 +339,16 @@ const styles = StyleSheet.create({
   },
   emptyStateButton: {
     marginTop: Spacing.one,
+  },
+  exerciseNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: Spacing.one + Spacing.half,
+  },
+  muscleBadgeSmall: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.half,
+    borderRadius: Spacing.one,
   },
 });
