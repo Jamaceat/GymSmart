@@ -9,10 +9,20 @@ import {
   ActivityIndicator,
   useWindowDimensions,
   Platform,
+  GestureResponderEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSQLiteContext } from 'expo-sqlite';
 import { SymbolView } from 'expo-symbols';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withRepeat,
+  withDelay,
+  Easing,
+  SharedValue,
+} from 'react-native-reanimated';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -20,6 +30,9 @@ import { Colors, Spacing, MaxContentWidth } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useAlert } from '@/components/ui/alert-provider';
 import { DatePickerModal } from '@/components/ui/date-picker-modal';
+import { ExerciseHistoryModal } from '@/components/ui/exercise-history-modal';
+import { WaterFill } from '@/components/ui/water-fill';
+import { WATER_FILL_CONSTANTS } from '@/constants/water-fill';
 import {
   getExerciseStatsAllTime,
   getExerciseStatsForRange,
@@ -60,6 +73,38 @@ export default function StatisticsScreen() {
   const [historyData, setHistoryData] = useState<ExerciseProgressHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState<number | null>(null);
+
+  // Modal for exercise history details
+  const [historyModalVisible, setHistoryModalVisible] = useState(false);
+  const [selectedExerciseForHistory, setSelectedExerciseForHistory] = useState<{
+    id: number | null;
+    name: string;
+  } | null>(null);
+
+  // Water filling animation states
+  const [pressingKey, setPressingKey] = useState<string | null>(null);
+  const [pressLocation, setPressLocation] = useState<{ x: number; y: number } | null>(null);
+  const fillProgress = useSharedValue(0);
+
+  const handlePressIn = (key: string, event: GestureResponderEvent) => {
+    const { locationX, locationY } = event.nativeEvent;
+    setPressLocation({ x: locationX, y: locationY });
+    setPressingKey(key);
+    fillProgress.value = 0;
+    fillProgress.value = withTiming(1, { duration: WATER_FILL_CONSTANTS.FILL_DURATION_MS });
+  };
+
+  const handlePressOut = () => {
+    setPressingKey(null);
+    fillProgress.value = withTiming(0, { duration: WATER_FILL_CONSTANTS.DRAIN_DURATION_MS });
+  };
+
+  const handleLongPress = (exerciseId: number | null, exerciseName: string) => {
+    setSelectedExerciseForHistory({ id: exerciseId, name: exerciseName });
+    setHistoryModalVisible(true);
+    setPressingKey(null);
+    fillProgress.value = 0;
+  };
 
   // Reset expanded state and search query on filter change
   useEffect(() => {
@@ -508,12 +553,20 @@ export default function StatisticsScreen() {
                     <ThemedView key={index} type="backgroundElement" style={styles.rankCard}>
                       <Pressable
                         onPress={() => handleToggleExpand(item.exercise_id, item.exercise_name)}
+                        onPressIn={(event) => handlePressIn(key, event)}
+                        onPressOut={handlePressOut}
+                        delayLongPress={WATER_FILL_CONSTANTS.FILL_DURATION_MS}
+                        onLongPress={() => handleLongPress(item.exercise_id, item.exercise_name)}
                         style={({ pressed }) => [
                           styles.rankCardHeaderPressable,
                           pressed && styles.pressed,
                         ]}
                       >
-                        <View style={styles.rankCardHeader}>
+                        {pressingKey === key && (
+                          <WaterFill progress={fillProgress} pressLocation={pressLocation} />
+                        )}
+
+                        <View style={styles.rankCardHeader} pointerEvents="none">
                           <View style={styles.rankCardLeft}>
                             {/* Position badge */}
                             <View style={[styles.rankBadge, { backgroundColor: rankColor.backgroundColor }]}>
@@ -549,7 +602,7 @@ export default function StatisticsScreen() {
                         </View>
 
                         {/* Work Volume Progress Bar (relative comparison) */}
-                        <View style={styles.progressContainer}>
+                        <View style={styles.progressContainer} pointerEvents="none">
                           <View
                             style={[
                               styles.progressBar,
@@ -704,6 +757,18 @@ export default function StatisticsScreen() {
           </ScrollView>
         )}
       </SafeAreaView>
+
+      {selectedExerciseForHistory && (
+        <ExerciseHistoryModal
+          visible={historyModalVisible}
+          onClose={() => {
+            setHistoryModalVisible(false);
+            setSelectedExerciseForHistory(null);
+          }}
+          exerciseId={selectedExerciseForHistory.id}
+          exerciseName={selectedExerciseForHistory.name}
+        />
+      )}
     </ThemedView>
   );
 }

@@ -47,12 +47,6 @@ export default function CreateExerciseScreen() {
     { set: 3, reps: 10 },
   ]);
   const [videoUrl, setVideoUrl] = useState('');
-  
-  // Initial state / baseline states
-  const [initialWeight, setInitialWeight] = useState('');
-  const [initialReps, setInitialReps] = useState('');
-  const [initialNotes, setInitialNotes] = useState('');
-
   const [isLoading, setIsLoading] = useState(false);
 
   // Load existing exercise details if editing
@@ -81,16 +75,6 @@ export default function CreateExerciseScreen() {
             }
           }
 
-          if (exercise.initial_state) {
-            try {
-              const parsedState = JSON.parse(exercise.initial_state) as InitialStateConfig;
-              setInitialWeight(parsedState.weight.toString());
-              setInitialReps(parsedState.reps.toString());
-              setInitialNotes(parsedState.notes || '');
-            } catch (e) {
-              console.error('Failed to parse initial_state:', e);
-            }
-          }
         } else {
           alert('Error', 'No se encontró el ejercicio solicitado.');
           router.back();
@@ -150,13 +134,7 @@ export default function CreateExerciseScreen() {
     }
 
     const seriesConfigStr = !isConstant ? JSON.stringify(variableSets) : null;
-    const weightNum = parseFloat(initialWeight) || 0;
-    const repsNum = parseInt(initialReps, 10) || 0;
-    const initialStateStr = JSON.stringify({
-      weight: weightNum,
-      reps: repsNum,
-      notes: initialNotes.trim(),
-    });
+    const initialStateStr = null;
 
     const exerciseData: Omit<Exercise, 'id' | 'created_at'> = {
       name: name.trim(),
@@ -341,67 +319,6 @@ export default function CreateExerciseScreen() {
               </View>
             )}
 
-            {/* Estado de Referencia Inicial */}
-            <ThemedView type="backgroundElement" style={styles.sectionCard}>
-              <ThemedText type="smallBold" style={styles.sectionHeader}>
-                Punto de Partida Histórico (Día 1)
-              </ThemedText>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.sectionDescription}>
-                Registra tus logros iniciales para medir tu progreso a largo plazo.
-              </ThemedText>
-              
-              <View style={styles.row}>
-                <View style={[styles.flexField, { marginRight: Spacing.two }]}>
-                  <ThemedText type="smallBold" themeColor="textSecondary">
-                    Peso Inicial
-                  </ThemedText>
-                  <View style={[styles.inputWithSuffix, { backgroundColor: theme.background }]}>
-                    <TextInput
-                      style={[styles.suffixInput, { color: theme.text }]}
-                      placeholder="0"
-                      placeholderTextColor={theme.textSecondary}
-                      keyboardType="numeric"
-                      value={initialWeight}
-                      onChangeText={setInitialWeight}
-                    />
-                    <ThemedText type="small" themeColor="textSecondary">kg</ThemedText>
-                  </View>
-                </View>
-
-                <View style={styles.flexField}>
-                  <ThemedText type="smallBold" themeColor="textSecondary">
-                    Reps Iniciales
-                  </ThemedText>
-                  <TextInput
-                    style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
-                    placeholder="0"
-                    placeholderTextColor={theme.textSecondary}
-                    keyboardType="numeric"
-                    value={initialReps}
-                    onChangeText={setInitialReps}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.formGroup}>
-                <ThemedText type="smallBold" themeColor="textSecondary">
-                  Notas de Referencia
-                </ThemedText>
-                <TextInput
-                  style={[
-                    styles.input,
-                    styles.textArea,
-                    { color: theme.text, backgroundColor: theme.background },
-                  ]}
-                  placeholder="Ej. Costó las últimas reps, técnica estricta."
-                  placeholderTextColor={theme.textSecondary}
-                  value={initialNotes}
-                  onChangeText={setInitialNotes}
-                  multiline
-                  numberOfLines={3}
-                />
-              </View>
-            </ThemedView>
 
             {/* Save Button */}
             <Pressable
