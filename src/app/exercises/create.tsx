@@ -28,6 +28,7 @@ import {
 } from '@/database/database';
 import { useAlert } from '@/components/ui/alert-provider';
 import { MUSCLE_ZONES, MuscleIntensity, getMuscleName } from '@/constants/muscle-groups';
+import { MuscleVisualizerModal } from '@/components/ui/muscle-visualizer-modal';
 
 export default function CreateExerciseScreen() {
   const db = useSQLiteContext();
@@ -51,6 +52,13 @@ export default function CreateExerciseScreen() {
   const [selectedMuscles, setSelectedMuscles] = useState<{ muscle_id: string; intensity: MuscleIntensity }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showIntensityInfo, setShowIntensityInfo] = useState(false);
+  const [visualizerVisible, setVisualizerVisible] = useState(false);
+  const [focusedMuscleId, setFocusedMuscleId] = useState<string | null>(null);
+
+  const handleLongPressMuscle = (muscleId: string) => {
+    setFocusedMuscleId(muscleId);
+    setVisualizerVisible(true);
+  };
 
   // Load existing exercise details if editing
   useEffect(() => {
@@ -233,7 +241,7 @@ export default function CreateExerciseScreen() {
                 Músculos Involucrados e Intensidad
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary" style={{ marginBottom: Spacing.two }}>
-                Selecciona los músculos que trabaja este ejercicio y define su nivel: Primario (P), Secundario (S) o Estabilizador (E).
+                Selecciona los músculos que trabaja este ejercicio y define su nivel: Primario (P), Secundario (S) o Estabilizador (E). Mantén presionado un músculo para ver su ubicación en el cuerpo.
               </ThemedText>
 
               <Pressable
@@ -333,6 +341,8 @@ export default function CreateExerciseScreen() {
                           ]}>
                           <Pressable
                             onPress={handleToggleMuscle}
+                            onLongPress={() => handleLongPressMuscle(muscle.id)}
+                            delayLongPress={350}
                             style={styles.muscleItemLeft}>
                             <SymbolView
                               name={
@@ -532,6 +542,16 @@ export default function CreateExerciseScreen() {
             {/* Back bottom spacing */}
             <View style={styles.bottomSpacer} />
           </ScrollView>
+
+          <MuscleVisualizerModal
+            visible={visualizerVisible}
+            muscleId={focusedMuscleId}
+            selectedMuscles={selectedMuscles}
+            onClose={() => {
+              setVisualizerVisible(false);
+              setFocusedMuscleId(null);
+            }}
+          />
         </SafeAreaView>
       </ThemedView>
     </KeyboardAvoidingView>
