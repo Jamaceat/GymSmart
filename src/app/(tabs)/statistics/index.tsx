@@ -19,6 +19,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing, MaxContentWidth } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useAlert } from '@/components/ui/alert-provider';
+import { DatePickerModal } from '@/components/ui/date-picker-modal';
 import {
   getExerciseStatsAllTime,
   getExerciseStatsForRange,
@@ -42,6 +43,8 @@ export default function StatisticsScreen() {
   // Custom date range inputs
   const [startDateInput, setStartDateInput] = useState('');
   const [endDateInput, setEndDateInput] = useState('');
+  const [showStartPicker, setShowStartPicker] = useState(false);
+  const [showEndPicker, setShowEndPicker] = useState(false);
   
   // Applied date filters for queries
   const [appliedRange, setAppliedRange] = useState<{ start: string; end: string } | null>(null);
@@ -288,30 +291,68 @@ export default function StatisticsScreen() {
         {filterType === 'custom' && (
           <ThemedView type="backgroundElement" style={styles.customFilterCard}>
             <ThemedText type="smallBold" style={{ marginBottom: Spacing.one }}>
-              Rango de Fechas (AAAA-MM-DD)
+              Rango de Fechas
             </ThemedText>
             
             <View style={styles.customInputRow}>
               <View style={styles.inputField}>
                 <ThemedText type="code" themeColor="textSecondary">DESDE</ThemedText>
-                <TextInput
-                  style={[styles.dateInput, { color: theme.text, backgroundColor: theme.background }]}
-                  placeholder="AAAA-MM-DD"
-                  placeholderTextColor={theme.textSecondary}
-                  value={startDateInput}
-                  onChangeText={setStartDateInput}
-                />
+                <Pressable
+                  onPress={() => setShowStartPicker(true)}
+                  style={({ pressed }) => [
+                    styles.dateInputBtn,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      backgroundColor: theme.background,
+                    },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <ThemedText
+                    type="small"
+                    style={{
+                      color: startDateInput ? theme.text : theme.textSecondary,
+                      flex: 1,
+                    }}
+                  >
+                    {startDateInput || 'AAAA-MM-DD'}
+                  </ThemedText>
+                  <SymbolView
+                    name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
+                    size={16}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
               </View>
 
               <View style={styles.inputField}>
                 <ThemedText type="code" themeColor="textSecondary">HASTA</ThemedText>
-                <TextInput
-                  style={[styles.dateInput, { color: theme.text, backgroundColor: theme.background }]}
-                  placeholder="AAAA-MM-DD"
-                  placeholderTextColor={theme.textSecondary}
-                  value={endDateInput}
-                  onChangeText={setEndDateInput}
-                />
+                <Pressable
+                  onPress={() => setShowEndPicker(true)}
+                  style={({ pressed }) => [
+                    styles.dateInputBtn,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      backgroundColor: theme.background,
+                    },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <ThemedText
+                    type="small"
+                    style={{
+                      color: endDateInput ? theme.text : theme.textSecondary,
+                      flex: 1,
+                    }}
+                  >
+                    {endDateInput || 'AAAA-MM-DD'}
+                  </ThemedText>
+                  <SymbolView
+                    name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
+                    size={16}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
               </View>
 
               <Pressable
@@ -328,6 +369,22 @@ export default function StatisticsScreen() {
                 />
               </Pressable>
             </View>
+
+            <DatePickerModal
+              visible={showStartPicker}
+              onClose={() => setShowStartPicker(false)}
+              value={startDateInput}
+              onSelect={setStartDateInput}
+              title="Fecha de Inicio (Desde)"
+            />
+
+            <DatePickerModal
+              visible={showEndPicker}
+              onClose={() => setShowEndPicker(false)}
+              value={endDateInput}
+              onSelect={setEndDateInput}
+              title="Fecha de Fin (Hasta)"
+            />
           </ThemedView>
         )}
 
@@ -703,6 +760,15 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.two,
     paddingHorizontal: Spacing.two,
     fontSize: 14,
+  },
+  dateInputBtn: {
+    height: 44,
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
   },
   filterSubmitBtn: {
     height: 44,
