@@ -9,6 +9,8 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing, MaxContentWidth, BottomTabInset } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { DeleteHistoryModal } from '@/components/ui/delete-history-modal';
+import { clearExerciseHistory } from '@/database/database';
 
 export default function HomeScreen() {
   const db = useSQLiteContext();
@@ -22,6 +24,7 @@ export default function HomeScreen() {
     metaGroups: 0,
   });
   const [todayRoutines, setTodayRoutines] = useState<string[]>([]);
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
 
   const loadStats = useCallback(async () => {
     try {
@@ -59,6 +62,15 @@ export default function HomeScreen() {
       loadStats();
     }, [loadStats])
   );
+
+  const handleConfirmDelete = useCallback(async () => {
+    try {
+      await clearExerciseHistory(db);
+      await loadStats();
+    } catch (error) {
+      console.error('Error deleting history:', error);
+    }
+  }, [db, loadStats]);
 
   return (
     <ThemedView style={styles.container}>
@@ -284,6 +296,28 @@ export default function HomeScreen() {
             </Pressable>
           </View>
 
+          <Pressable
+            onPress={() => setDeleteModalVisible(true)}
+            style={({ pressed }) => [
+              styles.deleteHistoryBtn,
+              pressed && styles.pressed,
+            ]}>
+            <SymbolView
+              name={{ ios: 'trash', android: 'delete', web: 'delete' }}
+              size={14}
+              tintColor={theme.textSecondary}
+            />
+            <ThemedText type="small" themeColor="textSecondary" style={styles.deleteHistoryText}>
+              Limpiar historial de entrenamiento
+            </ThemedText>
+          </Pressable>
+
+          <DeleteHistoryModal
+            visible={deleteModalVisible}
+            onClose={() => setDeleteModalVisible(false)}
+            onConfirm={handleConfirmDelete}
+          />
+
           <View style={styles.bottomSpacer} />
         </ScrollView>
       </SafeAreaView>
@@ -400,6 +434,18 @@ const styles = StyleSheet.create({
   },
   bottomSpacer: {
     height: Spacing.four,
+  },
+  deleteHistoryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    paddingVertical: Spacing.two,
+    marginTop: Spacing.two,
+  },
+  deleteHistoryText: {
+    fontSize: 12,
+    opacity: 0.6,
   },
 });
 

@@ -759,3 +759,12 @@ export async function getWorkedMusclesForRange(
     intensity,
   }));
 }
+
+export async function clearExerciseHistory(db: SQLiteDatabase): Promise<void> {
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('DELETE FROM exercise_completion_audits;');
+    await db.runAsync('DELETE FROM scheduled_routines;');
+    await db.runAsync('DELETE FROM session_progress;');
+  });
+}
+
