@@ -32,6 +32,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { useAlert } from '@/components/ui/alert-provider';
 import { DatePickerModal } from '@/components/ui/date-picker-modal';
 import { ExerciseHistoryModal } from '@/components/ui/exercise-history-modal';
+import { WorkedMusclesModal } from '@/components/ui/worked-muscles-modal';
 import { WaterFill } from '@/components/ui/water-fill';
 import { WATER_FILL_CONSTANTS } from '@/constants/water-fill';
 import {
@@ -86,6 +87,9 @@ export default function StatisticsScreen() {
     id: number | null;
     name: string;
   } | null>(null);
+
+  // Worked muscles visualization modal
+  const [workedMusclesModalVisible, setWorkedMusclesModalVisible] = useState(false);
 
   // Water filling animation states
   const [pressingKey, setPressingKey] = useState<string | null>(null);
@@ -336,12 +340,24 @@ export default function StatisticsScreen() {
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         {/* Header Title */}
         <View style={styles.header}>
-          <ThemedText type="subtitle" style={styles.headerTitle}>
-            Estadísticas
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            Monitorea tu volumen y consistencia de entrenamiento
-          </ThemedText>
+          <View style={styles.headerLeftContainer}>
+            <ThemedText type="subtitle" style={styles.headerTitle}>
+              Estadísticas
+            </ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">
+              Monitorea tu volumen y consistencia de entrenamiento
+            </ThemedText>
+          </View>
+          <Pressable
+            onPress={() => setWorkedMusclesModalVisible(true)}
+            style={({ pressed }) => [styles.anatomyBtn, pressed && styles.pressed]}
+          >
+            <SymbolView
+              name={{ ios: 'figure.strengthtraining.traditional', android: 'accessibility_new', web: 'accessibility_new' }}
+              size={26}
+              tintColor={theme.text}
+            />
+          </Pressable>
         </View>
 
         {/* Segmented Filter Pills */}
@@ -833,6 +849,23 @@ export default function StatisticsScreen() {
           exerciseName={selectedExerciseForHistory.name}
         />
       )}
+
+      <WorkedMusclesModal
+        visible={workedMusclesModalVisible}
+        onClose={() => setWorkedMusclesModalVisible(false)}
+        dateRange={appliedRange}
+        filterLabel={
+          filterType === 'all'
+            ? 'Histórico'
+            : filterType === 'today'
+            ? 'Hoy'
+            : filterType === 'week'
+            ? 'Esta Semana'
+            : filterType === 'month'
+            ? 'Este Mes'
+            : 'Personalizado'
+        }
+      />
     </ThemedView>
   );
 }
@@ -851,7 +884,22 @@ const styles = StyleSheet.create({
   header: {
     marginTop: Spacing.four,
     marginBottom: Spacing.three,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  headerLeftContainer: {
     gap: Spacing.half,
+    flex: 1,
+  },
+  anatomyBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(128,128,128,0.2)',
   },
   headerTitle: {
     fontSize: 28,

@@ -709,9 +709,53 @@ export async function getExerciseProgressHistory(
        FROM exercise_completion_audits
        WHERE exercise_name = ?
        GROUP BY completed_date, routine_id
-       ORDER BY completed_date ASC`,
+        ORDER BY completed_date ASC`,
       [exerciseName]
     );
   }
 }
 
+export interface WorkedMuscle {
+  muscle_id: string;
+  intensity: MuscleIntensity;
+}
+
+export async function getWorkedMusclesForRange(
+  db: SQLiteDatabase,
+  startDate: string | null,
+  endDate: string | null
+): Promise<WorkedMuscle[]> {
+  let query = `
+    SELECT em.muscle_id, em.intensity
+    FROM exercise_completion_audits a
+    JOIN exercises e ON (a.exercise_id = e.id OR (a.exercise_id IS NULL AND a.exercise_name = e.name))
+    JOIN exercise_muscles em ON e.id = em.exercise_id
+  `;
+  const params: string[] = [];
+  if (startDate && endDate) {
+    query += ` WHERE a.completed_date BETWEEN ? AND ?`;
+    params.push(startDate, endDate);
+  }
+
+  const rows = await db.getAllAsync<{ muscle_id: string; intensity: MuscleIntensity }>(query, params);
+
+  // Combine to keep the highest intensity per muscle_id
+  const intensityOrder: Record<MuscleIntensity, number> = {
+    primary: 3,
+    secondary: 2,
+    stabilizer: 1
+  };
+
+  const combined: Record<string, MuscleIntensity> = {};
+  for (const row of rows) {
+    const existing = combined[row.muscle_id];
+    if (!existing || intensityOrder[row.intensity] > intensityOrder[existing]) {
+      combined[row.muscle_id] = row.intensity;
+    }
+  }
+
+  return Object.entries(combined).map(([muscle_id, intensity]) => ({
+    muscle_id,
+    intensity,
+  }));
+}
