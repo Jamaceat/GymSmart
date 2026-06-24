@@ -10,6 +10,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Colors, Spacing, MaxContentWidth, BottomTabInset } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { DeleteHistoryModal } from '@/components/ui/delete-history-modal';
+import { BackupModal } from '@/components/ui/backup-modal';
 import { clearExerciseHistory } from '@/database/database';
 
 export default function HomeScreen() {
@@ -25,6 +26,7 @@ export default function HomeScreen() {
   });
   const [todayRoutines, setTodayRoutines] = useState<string[]>([]);
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [backupModalVisible, setBackupModalVisible] = useState(false);
 
   const loadStats = useCallback(async () => {
     try {
@@ -297,6 +299,23 @@ export default function HomeScreen() {
           </View>
 
           <Pressable
+            onPress={() => setBackupModalVisible(true)}
+            style={({ pressed }) => [
+              styles.backupBtn,
+              { backgroundColor: theme.backgroundElement },
+              pressed && styles.pressed,
+            ]}>
+            <SymbolView
+              name={{ ios: 'square.and.arrow.up.on.square.fill', android: 'backup', web: 'backup' }}
+              size={16}
+              tintColor="#3c87f7"
+            />
+            <ThemedText type="smallBold" style={styles.backupText}>
+              Copia de Seguridad y Respaldos
+            </ThemedText>
+          </Pressable>
+
+          <Pressable
             onPress={() => setDeleteModalVisible(true)}
             style={({ pressed }) => [
               styles.deleteHistoryBtn,
@@ -316,6 +335,12 @@ export default function HomeScreen() {
             visible={deleteModalVisible}
             onClose={() => setDeleteModalVisible(false)}
             onConfirm={handleConfirmDelete}
+          />
+
+          <BackupModal
+            visible={backupModalVisible}
+            onClose={() => setBackupModalVisible(false)}
+            onRefreshStats={loadStats}
           />
 
           <View style={styles.bottomSpacer} />
@@ -446,6 +471,19 @@ const styles = StyleSheet.create({
   deleteHistoryText: {
     fontSize: 12,
     opacity: 0.6,
+  },
+  backupBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.four,
+    borderRadius: Spacing.three,
+    marginTop: Spacing.three,
+  },
+  backupText: {
+    fontSize: 14,
   },
 });
 

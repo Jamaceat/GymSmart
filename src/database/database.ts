@@ -768,3 +768,286 @@ export async function clearExerciseHistory(db: SQLiteDatabase): Promise<void> {
   });
 }
 
+// ==========================================
+// BACKUP EXPORT & IMPORT OPERATIONS
+// ==========================================
+
+export interface BackupOptions {
+  exercises: boolean;
+  groups: boolean;
+  routines: boolean;
+  history: boolean;
+}
+
+export interface BackupPayload {
+  exercises?: any[];
+  groups?: any[];
+  routines?: any[];
+  history?: {
+    scheduled_routines?: any[];
+    completion_audits?: any[];
+  };
+}
+
+export async function exportBackupData(
+  db: SQLiteDatabase,
+  options: BackupOptions
+): Promise<BackupPayload> {
+  const payload: BackupPayload = {};
+
+  if (options.exercises) {
+    const exercises = await db.getAllAsync<any>('SELECT * FROM exercises ORDER BY id ASC');
+    for (const ex of exercises) {
+      const muscles = await db.getAllAsync<{ muscle_id: string; intensity: string }>(
+        'SELECT muscle_id, intensity FROM exercise_muscles WHERE exercise_id = ?',
+        [ex.id]
+      );
+      ex.muscles = muscles;
+    }
+    payload.exercises = exercises;
+  }
+
+  if (options.groups) {
+    const groups = await db.getAllAsync<any>('SELECT * FROM exercise_groups ORDER BY id ASC');
+    for (const gr of groups) {
+      const groupExercises = await db.getAllAsync<{ exercise_id: number; order_index: number }>(
+        'SELECT exercise_id, order_index FROM group_exercises WHERE group_id = ? ORDER BY order_index ASC',
+        [gr.id]
+      );
+      gr.exercises = groupExercises;
+    }
+    payload.groups = groups;
+  }
+
+  if (options.routines) {
+    const routines = await db.getAllAsync<any>('SELECT * FROM meta_groups ORDER BY id ASC');
+    for (const rt of routines) {
+      const groups = await db.getAllAsync<{ id: number; group_id: number; order_index: number }>(
+        'SELECT id, group_id, order_index FROM meta_group_items WHERE meta_group_id = ? ORDER BY order_index ASC',
+        [rt.id]
+      );
+      rt.groups = groups;
+    }
+    payload.routines = routines;
+  }
+
+  if (options.history) {
+    const scheduled = await db.getAllAsync<any>('SELECT * FROM scheduled_routines ORDER BY id ASC');
+    const audits = await db.getAllAsync<any>('SELECT * FROM exercise_completion_audits ORDER BY id ASC');
+    payload.history = {
+      scheduled_routines: scheduled,
+      completion_audits: audits,
+    };
+  }
+
+  return payload;
+}
+
+export async function importBackupData(
+  db: SQLiteDatabase,
+  payload: BackupPayload
+): Promise<{ success: boolean; message: string }> {
+  try {
+    await db.withTransactionAsync(async () => {
+      const exerciseIdMap: Record<number, number> = {};
+      const groupIdMap: Record<number, number> = {};
+      const routineIdMap: Record<number, number> = {};
+      const metaGroupItemIdMap: Record<number, number> = {};
+
+      // 1. Import Exercises
+      if (payload.exercises && payload.exercises.length > 0) {
+        for (const ex of payload.exercises) {
+          const existing = await db.getFirstAsync<{ id: number }>(
+            'SELECT id FROM exercises WHERE name = ?',
+            [ex.name]
+          );
+          let exerciseId: number;
+          if (existing) {
+            exerciseId = existing.id;
+          } else {
+            const result = await db.runAsync(
+              `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                ex.name,
+                ex.default_sets ?? 3,
+                ex.default_reps ?? 10,
+                ex.is_constant ?? 1,
+                ex.series_config ?? null,
+                ex.video_url ?? null,
+                ex.initial_state ?? null,
+                ex.muscle_group ?? null,
+                ex.created_at ?? new Date().toISOString()
+              ]
+            );
+            exerciseId = result.lastInsertRowId;
+
+            if (ex.muscles && ex.muscles.length > 0) {
+              for (const m of ex.muscles) {
+                await db.runAsync(
+                  'INSERT OR IGNORE INTO exercise_muscles (exercise_id, muscle_id, intensity) VALUES (?, ?, ?)',
+                  [exerciseId, m.muscle_id, m.intensity]
+                );
+              }
+            }
+          }
+          exerciseIdMap[ex.id] = exerciseId;
+        }
+      }
+
+      // 2. Import Groups
+      if (payload.groups && payload.groups.length > 0) {
+        for (const gr of payload.groups) {
+          const existing = await db.getFirstAsync<{ id: number }>(
+            'SELECT id FROM exercise_groups WHERE name = ?',
+            [gr.name]
+          );
+          let groupId: number;
+          if (existing) {
+            groupId = existing.id;
+          } else {
+            const result = await db.runAsync(
+              'INSERT INTO exercise_groups (name, created_at) VALUES (?, ?)',
+              [gr.name, gr.created_at ?? new Date().toISOString()]
+            );
+            groupId = result.lastInsertRowId;
+          }
+          groupIdMap[gr.id] = groupId;
+
+          if (gr.exercises && gr.exercises.length > 0) {
+            for (const link of gr.exercises) {
+              const mappedExId = exerciseIdMap[link.exercise_id];
+              if (mappedExId) {
+                await db.runAsync(
+                  'INSERT OR REPLACE INTO group_exercises (group_id, exercise_id, order_index) VALUES (?, ?, ?)',
+                  [groupId, mappedExId, link.order_index]
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Import Routines (MetaGroups)
+      if (payload.routines && payload.routines.length > 0) {
+        for (const rt of payload.routines) {
+          const existing = await db.getFirstAsync<{ id: number }>(
+            'SELECT id FROM meta_groups WHERE name = ?',
+            [rt.name]
+          );
+          let routineId: number;
+          if (existing) {
+            routineId = existing.id;
+          } else {
+            const result = await db.runAsync(
+              'INSERT INTO meta_groups (name, created_at) VALUES (?, ?)',
+              [rt.name, rt.created_at ?? new Date().toISOString()]
+            );
+            routineId = result.lastInsertRowId;
+          }
+          routineIdMap[rt.id] = routineId;
+
+          if (rt.groups && rt.groups.length > 0) {
+            for (const item of rt.groups) {
+              const mappedGroupId = groupIdMap[item.group_id];
+              if (mappedGroupId) {
+                const existingItem = await db.getFirstAsync<{ id: number }>(
+                  'SELECT id FROM meta_group_items WHERE meta_group_id = ? AND group_id = ?',
+                  [routineId, mappedGroupId]
+                );
+                let itemId: number;
+                if (existingItem) {
+                  itemId = existingItem.id;
+                } else {
+                  const resultItem = await db.runAsync(
+                    'INSERT INTO meta_group_items (meta_group_id, group_id, order_index) VALUES (?, ?, ?)',
+                    [routineId, mappedGroupId, item.order_index]
+                  );
+                  itemId = resultItem.lastInsertRowId;
+                }
+                metaGroupItemIdMap[item.id] = itemId;
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Import History
+      if (payload.history) {
+        const { scheduled_routines, completion_audits } = payload.history;
+
+        if (scheduled_routines && scheduled_routines.length > 0) {
+          for (const sr of scheduled_routines) {
+            const mappedMetaGroupId = routineIdMap[sr.meta_group_id];
+            if (mappedMetaGroupId) {
+              const existingSR = await db.getFirstAsync<{ id: number }>(
+                'SELECT id FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ?',
+                [mappedMetaGroupId, sr.scheduled_date]
+              );
+              if (!existingSR) {
+                await db.runAsync(
+                  'INSERT INTO scheduled_routines (meta_group_id, scheduled_date, is_completed, created_at) VALUES (?, ?, ?, ?)',
+                  [
+                    mappedMetaGroupId,
+                    sr.scheduled_date,
+                    sr.is_completed ?? 0,
+                    sr.created_at ?? new Date().toISOString()
+                  ]
+                );
+              }
+            }
+          }
+        }
+
+        if (completion_audits && completion_audits.length > 0) {
+          for (const audit of completion_audits) {
+            const mappedExId = audit.exercise_id ? exerciseIdMap[audit.exercise_id] : null;
+            const mappedRoutineId = audit.routine_id ? routineIdMap[audit.routine_id] : null;
+            const mappedMetaGroupItemId = audit.meta_group_item_id ? metaGroupItemIdMap[audit.meta_group_item_id] : null;
+
+            // Evitar duplicados de auditoría
+            const existingAudit = await db.getFirstAsync<{ id: number }>(
+              `SELECT id FROM exercise_completion_audits 
+               WHERE completed_date = ? AND exercise_name = ? AND set_index = ? AND routine_name = ? AND repetitions = ?`,
+              [
+                audit.completed_date,
+                audit.exercise_name,
+                audit.set_index,
+                audit.routine_name,
+                audit.repetitions
+              ]
+            );
+
+            if (!existingAudit) {
+              await db.runAsync(
+                `INSERT INTO exercise_completion_audits 
+                 (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  mappedExId,
+                  audit.exercise_name,
+                  audit.set_index,
+                  audit.repetitions,
+                  audit.seconds_taken ?? null,
+                  mappedRoutineId,
+                  audit.routine_name,
+                  audit.completed_date,
+                  audit.group_name ?? null,
+                  mappedMetaGroupItemId,
+                  audit.created_at ?? new Date().toISOString()
+                ]
+              );
+            }
+          }
+        }
+      }
+    });
+
+    return { success: true, message: 'Datos importados con éxito.' };
+  } catch (error: any) {
+    console.error('Error importing backup data:', error);
+    return { success: false, message: `Error al importar: ${error?.message || error}` };
+  }
+}
+
+
