@@ -656,7 +656,7 @@ export default function StatisticsScreen() {
 
                   // For chart scaling: find the maximum reps in historyData
                   const maxHistoryReps = historyData.length > 0
-                    ? Math.max(...historyData.map(h => h.total_reps), 10)
+                    ? Math.max(...historyData.map(h => h.max_reps ?? 10), 10)
                     : 10;
 
                   // For chart scaling: find the maximum weight in historyData
@@ -771,7 +771,11 @@ export default function StatisticsScreen() {
                                 >
                                   {historyData.map((histItem, idx) => {
                                     const isSelected = selectedHistoryIndex === idx;
-                                    const barHeight = getScaledHeight(histItem.total_reps, maxHistoryReps);
+                                    const reps = histItem.all_reps
+                                      ? Array.from(new Set(histItem.all_reps.split(',').map(Number)))
+                                            .filter(r => !isNaN(r) && r > 0)
+                                            .sort((a, b) => a - b)
+                                      : [];
                                     
                                     // Format YYYY-MM-DD to DD/MM
                                     const dateParts = histItem.completed_date.split('-');
@@ -790,20 +794,40 @@ export default function StatisticsScreen() {
                                             { color: isSelected ? '#3c87f7' : theme.textSecondary }
                                           ]}
                                         >
-                                          {histItem.total_reps}
+                                          {histItem.max_reps !== null && histItem.max_reps !== undefined ? `${histItem.max_reps}` : '-'}
                                         </ThemedText>
 
+                                        {/* Bar Track and Layered Fills */}
                                         <View style={styles.chartBarTrack}>
-                                          <View
-                                            style={[
-                                              styles.chartBarFill,
-                                              {
-                                                height: `${Math.max(5, barHeight)}%`,
-                                                backgroundColor: isSelected ? '#3c87f7' : '#5ba2f4',
-                                                opacity: isSelected ? 1 : 0.6,
-                                              }
-                                            ]}
-                                          />
+                                          {reps.length > 0 ? (
+                                            reps.slice().sort((a, b) => b - a).map((r, rIdx) => {
+                                              const singleBarHeight = getScaledHeight(r, maxHistoryReps);
+                                              const numReps = reps.length;
+                                              const opacity = numReps > 1
+                                                ? 0.3 + (rIdx / (numReps - 1)) * 0.7
+                                                : 1.0;
+
+                                              return (
+                                                <View
+                                                  key={rIdx}
+                                                  style={[
+                                                    styles.chartBarFill,
+                                                    {
+                                                      position: 'absolute',
+                                                      bottom: 0,
+                                                      left: 0,
+                                                      right: 0,
+                                                      height: `${Math.max(5, singleBarHeight)}%`,
+                                                      backgroundColor: isSelected ? '#3c87f7' : '#5ba2f4',
+                                                      opacity: isSelected ? opacity : opacity * 0.6,
+                                                    }
+                                                  ]}
+                                                />
+                                              );
+                                            })
+                                          ) : (
+                                            <View style={[styles.chartBarFill, { height: 0 }]} />
+                                          )}
                                         </View>
 
                                         <ThemedText
@@ -979,17 +1003,33 @@ export default function StatisticsScreen() {
                                       </ThemedText>
                                     </View>
                                     <View style={styles.detailRow}>
-                                      <SymbolView
-                                        name={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
-                                        size={14}
-                                        tintColor="#3c87f7"
-                                      />
-                                      <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#3c87f7' }}>
-                                        Volumen: {current.total_reps} repeticiones totales
-                                        <ThemedText type="smallBold" style={{ color: repsTrendColor }}>
-                                          {repsTrendText}
-                                        </ThemedText>
-                                      </ThemedText>
+                                      <View style={{ gap: 2 }}>
+                                        <View style={styles.detailRow}>
+                                          <SymbolView
+                                            name={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
+                                            size={14}
+                                            tintColor="#3c87f7"
+                                          />
+                                          <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#3c87f7' }}>
+                                            Volumen: {current.total_reps} repeticiones totales
+                                            <ThemedText type="smallBold" style={{ color: repsTrendColor }}>
+                                              {repsTrendText}
+                                            </ThemedText>
+                                          </ThemedText>
+                                        </View>
+                                        {(() => {
+                                          const reps = current.all_reps
+                                            ? Array.from(new Set(current.all_reps.split(',').map(Number)))
+                                                  .filter(r => !isNaN(r) && r > 0)
+                                                  .sort((a, b) => a - b)
+                                            : [];
+                                          return reps.length > 0 ? (
+                                            <ThemedText type="code" style={{ color: theme.textSecondary, marginLeft: 20, fontSize: 11 }}>
+                                              Reps por serie: {reps.map(r => `${r} reps`).join(', ')}
+                                            </ThemedText>
+                                          ) : null;
+                                        })()}
+                                      </View>
                                     </View>
                                     {current.max_weight !== null && current.max_weight !== undefined && (
                                       <View style={{ gap: 2 }}>

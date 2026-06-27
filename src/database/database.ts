@@ -706,6 +706,8 @@ export interface ExerciseProgressHistoryItem {
   routine_name: string;
   max_weight?: number | null;
   all_weights?: string | null;
+  max_reps?: number | null;
+  all_reps?: string | null;
 }
 
 export async function getExerciseProgressHistory(
@@ -718,8 +720,10 @@ export async function getExerciseProgressHistory(
       `SELECT 
          completed_date,
          SUM(repetitions) as total_reps,
+         MAX(repetitions) as max_reps,
          MAX(weight) as max_weight,
          GROUP_CONCAT(weight) as all_weights,
+         GROUP_CONCAT(repetitions) as all_reps,
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_id = ? OR exercise_name = ?
@@ -732,8 +736,10 @@ export async function getExerciseProgressHistory(
       `SELECT 
          completed_date,
          SUM(repetitions) as total_reps,
+         MAX(repetitions) as max_reps,
          MAX(weight) as max_weight,
          GROUP_CONCAT(weight) as all_weights,
+         GROUP_CONCAT(repetitions) as all_reps,
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_name = ?

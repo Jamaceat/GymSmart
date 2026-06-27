@@ -36,6 +36,8 @@ interface GroupedDataPoint {
   totalReps: number;
   maxWeight: number | null;
   weights: number[];
+  maxReps: number | null;
+  repsList: number[];
   details: {
     periodText: string;
     routineCount: number;
@@ -123,6 +125,8 @@ export function ExerciseHistoryModal({
       {
         label: string;
         reps: number;
+        maxReps: number | null;
+        repsList: Set<number>;
         maxWeight: number | null;
         weights: Set<number>;
         routineNames: Set<string>;
@@ -183,6 +187,8 @@ export function ExerciseHistoryModal({
         groups[key] = {
           label,
           reps: 0,
+          maxReps: null,
+          repsList: new Set(),
           maxWeight: null,
           weights: new Set(),
           routineNames: new Set(),
@@ -190,6 +196,19 @@ export function ExerciseHistoryModal({
         };
       }
       groups[key].reps += item.total_reps;
+      if (item.max_reps !== null && item.max_reps !== undefined) {
+        if (groups[key].maxReps === null || item.max_reps > groups[key].maxReps!) {
+          groups[key].maxReps = item.max_reps;
+        }
+      }
+      if (item.all_reps) {
+        item.all_reps.split(',').forEach((rStr) => {
+          const r = parseInt(rStr, 10);
+          if (!isNaN(r) && r > 0) {
+            groups[key].repsList.add(r);
+          }
+        });
+      }
       if (item.max_weight !== null && item.max_weight !== undefined) {
         if (groups[key].maxWeight === null || item.max_weight > groups[key].maxWeight!) {
           groups[key].maxWeight = item.max_weight;
@@ -216,6 +235,8 @@ export function ExerciseHistoryModal({
           totalReps: g.reps,
           maxWeight: g.maxWeight,
           weights: Array.from(g.weights).sort((a, b) => a - b),
+          maxReps: g.maxReps,
+          repsList: Array.from(g.repsList).sort((a, b) => a - b),
           details: {
             periodText: g.periodText,
             routineCount: g.routineNames.size,
@@ -239,7 +260,7 @@ export function ExerciseHistoryModal({
   // Find max reps in grouped data for chart scaling
   const maxGroupReps = useMemo(() => {
     if (groupedData.length === 0) return 10;
-    return Math.max(...groupedData.map((d) => d.totalReps), 10);
+    return Math.max(...groupedData.map((d) => d.maxReps ?? 10), 10);
   }, [groupedData]);
 
   // Find max weight in grouped data for chart scaling
@@ -350,7 +371,6 @@ export function ExerciseHistoryModal({
                 >
                   {groupedData.map((dataPoint, idx) => {
                     const isSelected = selectedIndex === idx;
-                    const barHeightPercent = getScaledHeight(dataPoint.totalReps, maxGroupReps);
 
                     return (
                       <Pressable
@@ -369,25 +389,40 @@ export function ExerciseHistoryModal({
                             },
                           ]}
                         >
-                          {dataPoint.totalReps}
+                          {dataPoint.maxReps !== null ? dataPoint.maxReps : '-'}
                         </ThemedText>
 
-                        {/* Bar Track and Fill */}
+                        {/* Bar Track and Layered Fills */}
                         <View style={[styles.barTrack, { backgroundColor: theme.backgroundSelected }]}>
-                          <View
-                            style={[
-                              styles.barFill,
-                              {
-                                height: `${Math.max(6, barHeightPercent)}%`,
-                                backgroundColor: isSelected ? '#3c87f7' : '#5ba2f4',
-                                shadowColor: isSelected ? '#3c87f7' : 'transparent',
-                                shadowOffset: { width: 0, height: 2 },
-                                shadowOpacity: isSelected ? 0.4 : 0,
-                                shadowRadius: 4,
-                                elevation: isSelected ? 4 : 0,
-                              },
-                            ]}
-                          />
+                          {dataPoint.repsList.length > 0 ? (
+                            dataPoint.repsList.slice().sort((a, b) => b - a).map((r, rIdx) => {
+                              const singleBarHeightPercent = getScaledHeight(r, maxGroupReps);
+                              const numReps = dataPoint.repsList.length;
+                              const opacity = numReps > 1
+                                ? 0.3 + (rIdx / (numReps - 1)) * 0.7
+                                : 1.0;
+
+                              return (
+                                <View
+                                  key={rIdx}
+                                  style={[
+                                    styles.barFill,
+                                    {
+                                      position: 'absolute',
+                                      bottom: 0,
+                                      left: 0,
+                                      right: 0,
+                                      height: `${Math.max(6, singleBarHeightPercent)}%`,
+                                      backgroundColor: isSelected ? '#3c87f7' : '#5ba2f4',
+                                      opacity: opacity,
+                                    },
+                                  ]}
+                                />
+                              );
+                            })
+                          ) : (
+                            <View style={[styles.barFill, { height: 0 }]} />
+                          )}
                         </View>
 
                         {/* Date label at bottom */}
@@ -595,6 +630,14 @@ export function ExerciseHistoryModal({
                         </ThemedText>
                       </View>
                     </View>
+
+                    {selectedData.repsList && selectedData.repsList.length > 0 && (
+                      <View style={{ marginTop: Spacing.half, borderTopWidth: 1, borderColor: 'rgba(128,128,128,0.1)', paddingTop: Spacing.half }}>
+                        <ThemedText type="code" style={{ color: theme.textSecondary, marginLeft: 6, fontSize: 11 }}>
+                          Repeticiones por serie: {selectedData.repsList.map(r => `${r} reps`).join(', ')}
+                        </ThemedText>
+                      </View>
+                    )}
 
                     {selectedData.maxWeight !== null && selectedData.maxWeight !== undefined && selectedData.maxWeight > 0 && (
                       <View style={{ marginTop: Spacing.one, borderTopWidth: 1, borderColor: 'rgba(128,128,128,0.1)', paddingTop: Spacing.one, gap: 4 }}>
