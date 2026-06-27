@@ -49,6 +49,7 @@ export default function CreateExerciseScreen() {
     { set: 3, reps: 10 },
   ]);
   const [videoUrl, setVideoUrl] = useState('');
+  const [weight, setWeight] = useState('');
   const [selectedMuscles, setSelectedMuscles] = useState<{ muscle_id: string; intensity: MuscleIntensity }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showIntensityInfo, setShowIntensityInfo] = useState(false);
@@ -76,6 +77,7 @@ export default function CreateExerciseScreen() {
           setDefaultReps(exercise.default_reps);
           setIsConstant(exercise.is_constant === 1);
           setVideoUrl(exercise.video_url || '');
+          setWeight(exercise.weight !== null && exercise.weight !== undefined ? exercise.weight.toString() : '');
           setSelectedMuscles(exercise.muscles || []);
 
           if (exercise.is_constant === 0 && exercise.series_config) {
@@ -157,6 +159,12 @@ export default function CreateExerciseScreen() {
       mainZoneName = zone ? zone.zone : null;
     }
 
+    const parsedWeight = weight.trim() !== '' ? parseFloat(weight.replace(',', '.')) : null;
+    if (parsedWeight !== null && isNaN(parsedWeight)) {
+      alert('Validación', 'El peso ingresado debe ser un número válido.');
+      return;
+    }
+
     const exerciseData: Omit<Exercise, 'id' | 'created_at'> = {
       name: name.trim(),
       default_sets: defaultSets,
@@ -167,6 +175,7 @@ export default function CreateExerciseScreen() {
       initial_state: initialStateStr,
       muscle_group: mainZoneName,
       muscles: selectedMuscles,
+      weight: parsedWeight,
     };
 
     try {
@@ -429,6 +438,27 @@ export default function CreateExerciseScreen() {
                 keyboardType="url"
                 editable={!isLoading}
               />
+            </View>
+
+            {/* Default Weight */}
+            <View style={styles.formGroup}>
+              <ThemedText type="smallBold" themeColor="textSecondary">
+                Peso Predeterminado (opcional)
+              </ThemedText>
+              <View style={[styles.inputWithSuffix, { backgroundColor: theme.backgroundElement }]}>
+                <TextInput
+                  style={[styles.suffixInput, { color: theme.text }]}
+                  placeholder="Ej. 20, 15.5 (Dejar vacío si no aplica)"
+                  placeholderTextColor={theme.textSecondary}
+                  keyboardType="numeric"
+                  value={weight}
+                  onChangeText={setWeight}
+                  editable={!isLoading}
+                />
+                <ThemedText type="smallBold" themeColor="textSecondary" style={{ marginRight: Spacing.three }}>
+                  kg
+                </ThemedText>
+              </View>
             </View>
 
             {/* Series Configuration Selector */}

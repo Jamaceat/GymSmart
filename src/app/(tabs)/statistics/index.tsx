@@ -47,12 +47,34 @@ import {
 
 type FilterType = 'all' | 'today' | 'week' | 'month' | 'custom';
 
+const getScaledHeight = (weight: number | null | undefined, maxWeight: number): number => {
+  if (weight === null || weight === undefined || weight <= 0 || maxWeight <= 0) {
+    return 0;
+  }
+  const threshold = 0.9 * maxWeight;
+  if (weight <= threshold) {
+    return (weight / threshold) * 70;
+  } else {
+    const range = maxWeight - threshold;
+    return range > 0
+      ? 70 + ((weight - threshold) / range) * 30
+      : 70;
+  }
+};
+
 export default function StatisticsScreen() {
   const db = useSQLiteContext();
   const theme = useTheme();
   const { alert } = useAlert();
   const { width } = useWindowDimensions();
   const isTablet = width > 768;
+
+  const showInfoAlert = () => {
+    alert(
+      'Información de Gráficos',
+      '• Escala Amplificada:\nLas gráficas de repeticiones y peso usan una escala no lineal para resaltar progresos en tus rangos más altos (el 30% superior del gráfico hace zoom, por ejemplo, para que se note la diferencia de 57 a 58 repeticiones o kg).\n\n• Capas de Intensidad:\nEl gráfico de peso muestra todos los pesos usados en la sesión encimados en la misma barra. El peso máximo se ve al fondo con menor opacidad, y los pesos más bajos se muestran al frente con mayor opacidad.'
+    );
+  };
 
   // Filter type selection
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -562,11 +584,19 @@ export default function StatisticsScreen() {
               </ThemedView>
             </View>
 
-            {/* Ranking Header */}
             <View style={styles.sectionHeaderRow}>
-              <ThemedText type="smallBold" style={styles.sectionTitle}>
-                Volumen de Trabajo por Ejercicio
-              </ThemedText>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <ThemedText type="smallBold" style={styles.sectionTitle}>
+                  Volumen de Trabajo por Ejercicio
+                </ThemedText>
+                <Pressable onPress={showInfoAlert} style={{ padding: 4 }}>
+                  <SymbolView
+                    name={{ ios: 'info.circle', android: 'info', web: 'info' }}
+                    size={16}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
+              </View>
               <View style={styles.toggleContainer}>
                 <ThemedText type="small" themeColor="textSecondary">
                   Mostrar no realizados
@@ -627,6 +657,11 @@ export default function StatisticsScreen() {
                   // For chart scaling: find the maximum reps in historyData
                   const maxHistoryReps = historyData.length > 0
                     ? Math.max(...historyData.map(h => h.total_reps), 10)
+                    : 10;
+
+                  // For chart scaling: find the maximum weight in historyData
+                  const maxHistoryWeight = historyData.length > 0
+                    ? Math.max(...historyData.map(h => h.max_weight ?? 0), 10)
                     : 10;
 
                   return (
@@ -699,7 +734,7 @@ export default function StatisticsScreen() {
                       {isExpanded && (
                         <View style={styles.expandedContent}>
                           <ThemedText type="smallBold" style={styles.chartTitle}>
-                            Progreso de Repeticiones por Rutina
+                            Progreso por Rutina
                           </ThemedText>
                           
                           {isHistoryLoading ? (
@@ -717,7 +752,10 @@ export default function StatisticsScreen() {
                             </View>
                           ) : (
                             <View style={styles.chartWrapper}>
-                              {/* Chart Area */}
+                              {/* Reps Chart */}
+                              <ThemedText type="code" themeColor="textSecondary" style={{ fontWeight: 'bold' }}>
+                                Repeticiones Totales (Volumen)
+                              </ThemedText>
                               <View style={[styles.chartContainer, { backgroundColor: theme.background }]}>
                                 {/* Background Grid Lines */}
                                 <View style={styles.gridContainer}>
@@ -733,7 +771,7 @@ export default function StatisticsScreen() {
                                 >
                                   {historyData.map((histItem, idx) => {
                                     const isSelected = selectedHistoryIndex === idx;
-                                    const barHeight = maxHistoryReps > 0 ? (histItem.total_reps / maxHistoryReps) * 100 : 0;
+                                    const barHeight = getScaledHeight(histItem.total_reps, maxHistoryReps);
                                     
                                     // Format YYYY-MM-DD to DD/MM
                                     const dateParts = histItem.completed_date.split('-');
@@ -783,41 +821,208 @@ export default function StatisticsScreen() {
                                 </ScrollView>
                               </View>
 
-                              {/* Detail Panel */}
-                              {selectedHistoryIndex !== null && historyData[selectedHistoryIndex] && (
-                                <View style={[styles.detailBox, { backgroundColor: theme.backgroundSelected }]}>
-                                  <View style={styles.detailRow}>
-                                    <SymbolView
-                                      name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
-                                      size={14}
-                                      tintColor={theme.textSecondary}
-                                    />
-                                    <ThemedText type="smallBold" style={{ marginLeft: Spacing.one }}>
-                                      {historyData[selectedHistoryIndex].completed_date}
-                                    </ThemedText>
-                                  </View>
-                                  <View style={styles.detailRow}>
-                                    <SymbolView
-                                      name={{ ios: 'dumbbell', android: 'fitness_center', web: 'fitness_center' }}
-                                      size={14}
-                                      tintColor={theme.textSecondary}
-                                    />
-                                    <ThemedText type="small" style={{ marginLeft: Spacing.one, flex: 1 }} numberOfLines={1}>
-                                      Rutina: {historyData[selectedHistoryIndex].routine_name}
-                                    </ThemedText>
-                                  </View>
-                                  <View style={styles.detailRow}>
-                                    <SymbolView
-                                      name={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
-                                      size={14}
-                                      tintColor="#3c87f7"
-                                    />
-                                    <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#3c87f7' }}>
-                                      Volumen: {historyData[selectedHistoryIndex].total_reps} repeticiones totales
-                                    </ThemedText>
-                                  </View>
+                              {/* Weight Chart */}
+                              <ThemedText type="code" themeColor="textSecondary" style={{ fontWeight: 'bold', marginTop: Spacing.one }}>
+                                Peso Máximo (Intensidad)
+                              </ThemedText>
+                              <View style={[styles.chartContainer, { backgroundColor: theme.background }]}>
+                                {/* Background Grid Lines */}
+                                <View style={styles.gridContainer}>
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
+                                  <View style={[styles.gridLine, { borderColor: theme.backgroundElement }]} />
                                 </View>
-                              )}
+
+                                <ScrollView
+                                  horizontal
+                                  showsHorizontalScrollIndicator={false}
+                                  contentContainerStyle={styles.chartScrollContent}
+                                >
+                                  {historyData.map((histItem, idx) => {
+                                    const isSelected = selectedHistoryIndex === idx;
+                                    const weights = histItem.all_weights
+                                      ? Array.from(new Set(histItem.all_weights.split(',').map(Number)))
+                                            .filter(w => !isNaN(w) && w > 0)
+                                            .sort((a, b) => a - b)
+                                      : [];
+                                    
+                                    // Format YYYY-MM-DD to DD/MM
+                                    const dateParts = histItem.completed_date.split('-');
+                                    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : histItem.completed_date;
+
+                                    return (
+                                      <Pressable
+                                        key={idx}
+                                        onPress={() => setSelectedHistoryIndex(idx)}
+                                        style={styles.chartBarWrapper}
+                                      >
+                                        {/* Weight label on top of bar */}
+                                        <ThemedText
+                                          type="code"
+                                          style={[
+                                            styles.chartBarRepsLabel,
+                                            { color: isSelected ? '#ff9500' : theme.textSecondary }
+                                          ]}
+                                        >
+                                          {histItem.max_weight !== null && histItem.max_weight !== undefined ? `${histItem.max_weight}kg` : '-'}
+                                        </ThemedText>
+
+                                        {/* Bar Track and Layered Fills */}
+                                        <View style={styles.chartBarTrack}>
+                                          {weights.length > 0 ? (
+                                            weights.slice().sort((a, b) => b - a).map((w, wIdx) => {
+                                              const singleBarHeight = getScaledHeight(w, maxHistoryWeight);
+                                              const numWeights = weights.length;
+                                              const opacity = numWeights > 1 
+                                                ? 0.3 + (wIdx / (numWeights - 1)) * 0.7 
+                                                : 1.0;
+
+                                              return (
+                                                <View
+                                                  key={wIdx}
+                                                  style={[
+                                                    styles.chartBarFill,
+                                                    {
+                                                      position: 'absolute',
+                                                      bottom: 0,
+                                                      left: 0,
+                                                      right: 0,
+                                                      height: `${Math.max(5, singleBarHeight)}%`,
+                                                      backgroundColor: isSelected ? '#ff9500' : '#ffb03a',
+                                                      opacity: isSelected ? opacity : opacity * 0.6,
+                                                    }
+                                                  ]}
+                                                />
+                                              );
+                                            })
+                                          ) : (
+                                            <View style={[styles.chartBarFill, { height: 0 }]} />
+                                          )}
+                                        </View>
+
+                                        {/* Date label at bottom */}
+                                        <ThemedText
+                                          type="code"
+                                          style={[
+                                            styles.chartBarDateLabel,
+                                            { color: isSelected ? theme.text : theme.textSecondary, fontWeight: isSelected ? 'bold' : 'normal' }
+                                          ]}
+                                        >
+                                          {formattedDate}
+                                        </ThemedText>
+                                      </Pressable>
+                                    );
+                                  })}
+                                </ScrollView>
+                              </View>
+
+                              {/* Detail Panel */}
+                              {selectedHistoryIndex !== null && historyData[selectedHistoryIndex] && (() => {
+                                const current = historyData[selectedHistoryIndex];
+                                const previous = selectedHistoryIndex > 0 ? historyData[selectedHistoryIndex - 1] : null;
+
+                                // Reps progression trend
+                                let repsTrendText = '';
+                                let repsTrendColor: string = theme.textSecondary;
+                                if (previous) {
+                                  const diff = current.total_reps - previous.total_reps;
+                                  if (diff > 0) {
+                                    repsTrendText = ` (+${diff})`;
+                                    repsTrendColor = '#34c759'; // Green
+                                  } else if (diff < 0) {
+                                    repsTrendText = ` (${diff})`;
+                                    repsTrendColor = '#ff453a'; // Red
+                                  } else {
+                                    repsTrendText = ' (=)';
+                                    repsTrendColor = theme.textSecondary;
+                                  }
+                                }
+
+                                // Weight progression trend
+                                let weightTrendText = '';
+                                let weightTrendColor: string = theme.textSecondary;
+                                if (current.max_weight !== null && current.max_weight !== undefined &&
+                                    previous && previous.max_weight !== null && previous.max_weight !== undefined) {
+                                  const diff = current.max_weight - previous.max_weight;
+                                  if (diff > 0) {
+                                    weightTrendText = ` (+${diff} kg)`;
+                                    weightTrendColor = '#34c759'; // Green
+                                  } else if (diff < 0) {
+                                    weightTrendText = ` (${diff} kg)`;
+                                    weightTrendColor = '#ff453a'; // Red
+                                  } else {
+                                    weightTrendText = ' (=)';
+                                    weightTrendColor = theme.textSecondary;
+                                  }
+                                }
+
+                                return (
+                                  <View style={[styles.detailBox, { backgroundColor: theme.backgroundSelected }]}>
+                                    <View style={styles.detailRow}>
+                                      <SymbolView
+                                        name={{ ios: 'calendar', android: 'calendar_today', web: 'calendar_today' }}
+                                        size={14}
+                                        tintColor={theme.textSecondary}
+                                      />
+                                      <ThemedText type="smallBold" style={{ marginLeft: Spacing.one }}>
+                                        {current.completed_date}
+                                      </ThemedText>
+                                    </View>
+                                    <View style={styles.detailRow}>
+                                      <SymbolView
+                                        name={{ ios: 'dumbbell', android: 'fitness_center', web: 'fitness_center' }}
+                                        size={14}
+                                        tintColor={theme.textSecondary}
+                                      />
+                                      <ThemedText type="small" style={{ marginLeft: Spacing.one, flex: 1 }} numberOfLines={1}>
+                                        Rutina: {current.routine_name}
+                                      </ThemedText>
+                                    </View>
+                                    <View style={styles.detailRow}>
+                                      <SymbolView
+                                        name={{ ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' }}
+                                        size={14}
+                                        tintColor="#3c87f7"
+                                      />
+                                      <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#3c87f7' }}>
+                                        Volumen: {current.total_reps} repeticiones totales
+                                        <ThemedText type="smallBold" style={{ color: repsTrendColor }}>
+                                          {repsTrendText}
+                                        </ThemedText>
+                                      </ThemedText>
+                                    </View>
+                                    {current.max_weight !== null && current.max_weight !== undefined && (
+                                      <View style={{ gap: 2 }}>
+                                        <View style={styles.detailRow}>
+                                          <SymbolView
+                                            name={{ ios: 'scalemass.fill', android: 'scale', web: 'scale' }}
+                                            size={14}
+                                            tintColor="#ff9500"
+                                          />
+                                          <ThemedText type="smallBold" style={{ marginLeft: Spacing.one, color: '#ff9500' }}>
+                                            Peso Máx: {current.max_weight} kg
+                                            <ThemedText type="smallBold" style={{ color: weightTrendColor }}>
+                                              {weightTrendText}
+                                            </ThemedText>
+                                          </ThemedText>
+                                        </View>
+                                        {(() => {
+                                          const weights = current.all_weights
+                                            ? Array.from(new Set(current.all_weights.split(',').map(Number)))
+                                                  .filter(w => !isNaN(w) && w > 0)
+                                                  .sort((a, b) => a - b)
+                                            : [];
+                                          return weights.length > 0 ? (
+                                            <ThemedText type="code" style={{ color: theme.textSecondary, marginLeft: 20, fontSize: 11 }}>
+                                              Pesos: {weights.map(w => `${w} kg`).join(', ')}
+                                            </ThemedText>
+                                          ) : null;
+                                        })()}
+                                      </View>
+                                    )}
+                                  </View>
+                                );
+                              })()}
                             </View>
                           )}
                         </View>

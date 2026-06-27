@@ -80,6 +80,8 @@ export default function WorkoutSessionScreen() {
   const [currentSet, setCurrentSet] = useState<number>(1);
   const [setTimes, setSetTimes] = useState<Record<number, number>>({});
   const [customReps, setCustomReps] = useState<Record<string, Record<number, number>>>({});
+  const [customWeights, setCustomWeights] = useState<Record<string, Record<number, number>>>({});
+  const [expandedSets, setExpandedSets] = useState<Record<number, boolean>>({});
 
   // Timer State
   const [activeSeconds, setActiveSeconds] = useState<number>(0);
@@ -106,6 +108,7 @@ export default function WorkoutSessionScreen() {
     completedExercises,
     setTimes,
     customReps,
+    customWeights,
   });
 
   useEffect(() => {
@@ -119,8 +122,9 @@ export default function WorkoutSessionScreen() {
       completedExercises,
       setTimes,
       customReps,
+      customWeights,
     };
-  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes, customReps]);
+  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes, customReps, customWeights]);
 
   // Flattened active exercise helper
   const activeSessionItem = sessionExercises[activeIndex] || null;
@@ -149,7 +153,8 @@ export default function WorkoutSessionScreen() {
       doneSets: Set<number>,
       doneExs: Set<string>,
       timesMap?: Record<number, number>,
-      customRepsMap?: Record<string, Record<number, number>>
+      customRepsMap?: Record<string, Record<number, number>>,
+      customWeightsMap?: Record<string, Record<number, number>>
     ) => {
       try {
         const doneSetsStr = Array.from(doneSets).join(',');
@@ -158,10 +163,12 @@ export default function WorkoutSessionScreen() {
         const setTimesStr = JSON.stringify(currentTimes);
         const currentCustomReps = customRepsMap || stateRef.current.customReps || {};
         const customRepsStr = JSON.stringify(currentCustomReps);
+        const currentCustomWeights = customWeightsMap || stateRef.current.customWeights || {};
+        const customWeightsStr = JSON.stringify(currentCustomWeights);
         await db.runAsync(
           `INSERT OR REPLACE INTO session_progress 
-            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times, custom_reps) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times, custom_reps, custom_weights) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             parseInt(metaGroupId!, 10),
             date,
@@ -174,6 +181,7 @@ export default function WorkoutSessionScreen() {
             doneExsStr,
             setTimesStr,
             customRepsStr,
+            customWeightsStr,
           ]
         );
       } catch (e) {
@@ -237,6 +245,7 @@ export default function WorkoutSessionScreen() {
               completed_exercises: string | null;
               set_times: string | null;
               custom_reps: string | null;
+              custom_weights: string | null;
             }>(
               'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
               [mGroupId, date]
@@ -282,10 +291,21 @@ export default function WorkoutSessionScreen() {
               } else {
                 setCustomReps({});
               }
+
+              if (progress.custom_weights) {
+                try {
+                  setCustomWeights(JSON.parse(progress.custom_weights));
+                } catch (e) {
+                  setCustomWeights({});
+                }
+              } else {
+                setCustomWeights({});
+              }
             } else {
               setActiveIndex(0);
               setCompletedExercises(new Set());
               setCustomReps({});
+              setCustomWeights({});
             }
           }
         }
@@ -359,6 +379,7 @@ export default function WorkoutSessionScreen() {
         setCurrentSet(1);
         setCompletedSets(new Set());
         setSetTimes({});
+        setExpandedSets({});
         setResetSet(1);
         const initialReps = parsedSeriesConfig[0]?.reps ?? activeExercise.default_reps ?? 10;
         setResetReps(initialReps);
@@ -432,6 +453,32 @@ export default function WorkoutSessionScreen() {
       completedExercises,
       setTimes,
       updatedCustomReps
+    );
+  };
+
+  // Update specific set weight during session
+  const handleUpdateWeight = (setNum: number, newWeight: number) => {
+    if (!activeSessionItem) return;
+    const uniqueId = activeSessionItem.uniqueId;
+    const updatedCustomWeights = {
+      ...customWeights,
+      [uniqueId]: {
+        ...(customWeights[uniqueId] || {}),
+        [setNum]: newWeight,
+      },
+    };
+    setCustomWeights(updatedCustomWeights);
+    saveProgress(
+      activeIndex,
+      activeSeconds,
+      restSeconds,
+      isResting,
+      currentSet,
+      completedSets,
+      completedExercises,
+      setTimes,
+      customReps,
+      updatedCustomWeights
     );
   };
 
@@ -580,7 +627,8 @@ export default function WorkoutSessionScreen() {
       nextCompletedSets,
       completedExercises,
       nextSetTimes,
-      updatedCustomReps
+      updatedCustomReps,
+      customWeights
     );
 
     alert('Reiniciado', `Ejercicio reiniciado en la Serie ${resetSet} con ${resetReps} repeticiones.`);
@@ -634,12 +682,14 @@ export default function WorkoutSessionScreen() {
         // Insert audit for each completed set
         for (const setNum of completedSets) {
           const reps = customReps[activeSessionItem.uniqueId]?.[setNum] ?? seriesReps[setNum] ?? ex.default_reps ?? 10;
+          const weight = customWeights[activeSessionItem.uniqueId]?.[setNum] ?? ex.weight ?? null;
           const secs = setTimes[setNum] ?? 0;
           await insertExerciseCompletionAudit(db, {
             exercise_id: ex.id || null,
             exercise_name: ex.name,
             set_index: setNum,
             repetitions: reps,
+            weight: weight,
             seconds_taken: secs,
             routine_id: routineId,
             routine_name: routineName,
@@ -1081,86 +1131,280 @@ export default function WorkoutSessionScreen() {
                       const setNum = index + 1;
                       const isSetDone = completedSets.has(setNum);
                       const isActiveSet = currentSet === setNum;
+                      const isExpanded = expandedSets[setNum] ?? isActiveSet;
+
+                      const handlePressRow = () => {
+                        if (!isTablet) {
+                          setExpandedSets((prev) => ({
+                            ...prev,
+                            [setNum]: !isExpanded,
+                          }));
+                        } else {
+                          handleToggleSetManual(setNum);
+                        }
+                      };
+
+                      if (isTablet) {
+                        return (
+                          <Pressable
+                            key={setNum}
+                            onPress={handlePressRow}
+                            style={[
+                              styles.seriesItemRow,
+                              isActiveSet && { borderColor: '#3c87f7', borderWidth: 1.5 },
+                              isSetDone && { opacity: 0.6 },
+                            ]}>
+                            <View style={styles.seriesItemLeft}>
+                              <View
+                                style={[
+                                  styles.setCheckCircle,
+                                  isSetDone && { backgroundColor: '#34c759', borderColor: '#34c759' },
+                                  isActiveSet && !isSetDone && { borderColor: '#3c87f7' },
+                                ]}>
+                                {isSetDone && (
+                                  <SymbolView
+                                    name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+                                    size={10}
+                                    tintColor="#ffffff"
+                                  />
+                                )}
+                              </View>
+                              <ThemedText type="smallBold">
+                                Serie {setNum}
+                              </ThemedText>
+                            </View>
+
+                            <View style={styles.seriesItemRight}>
+                              {(() => {
+                                const currentRepsValue = customReps[activeSessionItem.uniqueId]?.[setNum] ?? item.reps;
+                                return (
+                                  <View style={styles.repsCounterContainer}>
+                                    <Pressable
+                                      onPress={(e) => {
+                                        e.stopPropagation();
+                                        handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1));
+                                      }}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtn,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>-</ThemedText>
+                                    </Pressable>
+                                    <ThemedText type="smallBold" style={styles.repsCounterValue}>
+                                      {currentRepsValue}
+                                    </ThemedText>
+                                    <Pressable
+                                      onPress={(e) => {
+                                        e.stopPropagation();
+                                        handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1));
+                                      }}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtn,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>+</ThemedText>
+                                    </Pressable>
+                                    <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                      reps
+                                    </ThemedText>
+                                  </View>
+                                );
+                              })()}
+                              {activeExercise?.weight !== null && activeExercise?.weight !== undefined && (() => {
+                                const currentWeightValue = customWeights[activeSessionItem.uniqueId]?.[setNum] ?? activeExercise.weight;
+                                return (
+                                  <View style={styles.repsCounterContainer}>
+                                    <Pressable
+                                      onPress={(e) => {
+                                        e.stopPropagation();
+                                        handleUpdateWeight(setNum, Math.max(0, currentWeightValue - 1));
+                                      }}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtn,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>-</ThemedText>
+                                    </Pressable>
+                                    <ThemedText type="smallBold" style={styles.repsCounterValue}>
+                                      {currentWeightValue}
+                                    </ThemedText>
+                                    <Pressable
+                                      onPress={(e) => {
+                                        e.stopPropagation();
+                                        handleUpdateWeight(setNum, Math.min(1000, currentWeightValue + 1));
+                                      }}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtn,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>+</ThemedText>
+                                    </Pressable>
+                                    <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                      kg
+                                    </ThemedText>
+                                  </View>
+                                );
+                              })()}
+                              {setTimes[setNum] !== undefined && (
+                                <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                  • {formatTime(setTimes[setNum])}
+                                </ThemedText>
+                              )}
+                              {isActiveSet && (
+                                <View style={styles.activeSetBadge}>
+                                  <ThemedText type="code" style={styles.activeSetBadgeText}>
+                                    ACTIVA
+                                  </ThemedText>
+                                </View>
+                              )}
+                            </View>
+                          </Pressable>
+                        );
+                      }
+
+                      // Mobile layout (Collapsible)
+                      const currentRepsValue = customReps[activeSessionItem.uniqueId]?.[setNum] ?? item.reps;
+                      const currentWeightValue = customWeights[activeSessionItem.uniqueId]?.[setNum] ?? activeExercise.weight;
+                      const hasWeight = activeExercise.weight !== null && activeExercise.weight !== undefined;
 
                       return (
-                        <Pressable
+                        <View
                           key={setNum}
-                          onPress={() => handleToggleSetManual(setNum)}
                           style={[
-                            styles.seriesItemRow,
+                            styles.mobileSeriesCard,
                             isActiveSet && { borderColor: '#3c87f7', borderWidth: 1.5 },
                             isSetDone && { opacity: 0.6 },
                           ]}>
-                          <View style={styles.seriesItemLeft}>
-                            <View
-                              style={[
-                                styles.setCheckCircle,
-                                isSetDone && { backgroundColor: '#34c759', borderColor: '#34c759' },
-                                isActiveSet && !isSetDone && { borderColor: '#3c87f7' },
-                              ]}>
-                              {isSetDone && (
-                                <SymbolView
-                                  name={{ ios: 'checkmark', android: 'check', web: 'check' }}
-                                  size={10}
-                                  tintColor="#ffffff"
-                                />
+                          {/* Row Header - Collapsible trigger */}
+                          <Pressable
+                            onPress={handlePressRow}
+                            style={styles.mobileSeriesHeader}>
+                            <View style={styles.seriesItemLeft}>
+                              <Pressable
+                                onPress={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleSetManual(setNum);
+                                }}
+                                style={[
+                                  styles.setCheckCircle,
+                                  isSetDone && { backgroundColor: '#34c759', borderColor: '#34c759' },
+                                  isActiveSet && !isSetDone && { borderColor: '#3c87f7' },
+                                ]}>
+                                {isSetDone && (
+                                  <SymbolView
+                                    name={{ ios: 'checkmark', android: 'check', web: 'check' }}
+                                    size={10}
+                                    tintColor="#ffffff"
+                                  />
+                                )}
+                              </Pressable>
+                              <ThemedText type="smallBold">
+                                Serie {setNum}
+                              </ThemedText>
+                              
+                              {/* Compact summary of values when collapsed */}
+                              {!isExpanded && (
+                                <ThemedText type="code" themeColor="textSecondary" style={styles.mobileSummaryText}>
+                                  ({currentRepsValue} reps{hasWeight ? ` • ${currentWeightValue} kg` : ''})
+                                </ThemedText>
                               )}
                             </View>
-                            <ThemedText type="smallBold">
-                              Serie {setNum}
-                            </ThemedText>
-                          </View>
 
-                          <View style={styles.seriesItemRight}>
-                            {(() => {
-                              const currentRepsValue = customReps[activeSessionItem.uniqueId]?.[setNum] ?? item.reps;
-                              return (
-                                <View style={styles.repsCounterContainer}>
-                                  <Pressable
-                                    onPress={(e) => {
-                                      e.stopPropagation();
-                                      handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1));
-                                    }}
-                                    style={({ pressed }) => [
-                                      styles.repsCounterBtn,
-                                      pressed && styles.repsCounterBtnPressed,
-                                    ]}>
-                                    <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>-</ThemedText>
-                                  </Pressable>
-                                  <ThemedText type="smallBold" style={styles.repsCounterValue}>
-                                    {currentRepsValue}
-                                  </ThemedText>
-                                  <Pressable
-                                    onPress={(e) => {
-                                      e.stopPropagation();
-                                      handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1));
-                                    }}
-                                    style={({ pressed }) => [
-                                      styles.repsCounterBtn,
-                                      pressed && styles.repsCounterBtnPressed,
-                                    ]}>
-                                    <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 16 }}>+</ThemedText>
-                                  </Pressable>
-                                  <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
-                                    reps
+                            <View style={styles.mobileSeriesHeaderRight}>
+                              {setTimes[setNum] !== undefined && (
+                                <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
+                                  {formatTime(setTimes[setNum])}
+                                </ThemedText>
+                              )}
+                              {isActiveSet && (
+                                <View style={styles.activeSetBadge}>
+                                  <ThemedText type="code" style={styles.activeSetBadgeText}>
+                                    ACTIVA
                                   </ThemedText>
                                 </View>
-                              );
-                            })()}
-                            {setTimes[setNum] !== undefined && (
-                              <ThemedText type="code" themeColor="textSecondary" style={{ marginRight: Spacing.one }}>
-                                • {formatTime(setTimes[setNum])}
-                              </ThemedText>
-                            )}
-                            {isActiveSet && (
-                              <View style={styles.activeSetBadge}>
-                                <ThemedText type="code" style={styles.activeSetBadgeText}>
-                                  ACTIVA
-                                </ThemedText>
+                              )}
+                              <SymbolView
+                                name={
+                                  isExpanded
+                                    ? { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' }
+                                    : { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }
+                                }
+                                size={18}
+                                tintColor={theme.textSecondary}
+                              />
+                            </View>
+                          </Pressable>
+
+                          {/* Collapsible Details */}
+                          {isExpanded && (
+                            <View style={styles.mobileSeriesDetails}>
+                              <View style={styles.mobileControlsRow}>
+                                {/* Reps Counter */}
+                                <View style={styles.mobileControlItem}>
+                                  <ThemedText type="code" themeColor="textSecondary" style={{ marginBottom: 4 }}>
+                                    REPETICIONES
+                                  </ThemedText>
+                                  <View style={styles.repsCounterContainer}>
+                                    <Pressable
+                                      onPress={() => handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1))}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtnLarge,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 18 }}>-</ThemedText>
+                                    </Pressable>
+                                    <ThemedText type="subtitle" style={styles.repsCounterValueLarge}>
+                                      {currentRepsValue}
+                                    </ThemedText>
+                                    <Pressable
+                                      onPress={() => handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1))}
+                                      style={({ pressed }) => [
+                                        styles.repsCounterBtnLarge,
+                                        pressed && styles.repsCounterBtnPressed,
+                                      ]}>
+                                      <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 18 }}>+</ThemedText>
+                                    </Pressable>
+                                  </View>
+                                </View>
+
+                                {/* Weight Counter (if configured) */}
+                                {hasWeight && (
+                                  <View style={styles.mobileControlItem}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 2 }}>
+                                      <ThemedText type="code" themeColor="textSecondary" style={{ marginBottom: 4 }}>
+                                        PESO
+                                      </ThemedText>
+                                      <ThemedText type="code" themeColor="textSecondary" style={{ fontSize: 10 }}>
+                                        (KG)
+                                      </ThemedText>
+                                    </View>
+                                    <View style={styles.repsCounterContainer}>
+                                      <Pressable
+                                        onPress={() => handleUpdateWeight(setNum, Math.max(0, currentWeightValue - 1))}
+                                        style={({ pressed }) => [
+                                          styles.repsCounterBtnLarge,
+                                          pressed && styles.repsCounterBtnPressed,
+                                        ]}>
+                                        <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 18 }}>-</ThemedText>
+                                      </Pressable>
+                                      <ThemedText type="subtitle" style={styles.repsCounterValueLarge}>
+                                        {currentWeightValue}
+                                      </ThemedText>
+                                      <Pressable
+                                        onPress={() => handleUpdateWeight(setNum, Math.min(1000, currentWeightValue + 1))}
+                                        style={({ pressed }) => [
+                                          styles.repsCounterBtnLarge,
+                                          pressed && styles.repsCounterBtnPressed,
+                                        ]}>
+                                        <ThemedText type="smallBold" style={{ color: theme.text, fontSize: 18 }}>+</ThemedText>
+                                      </Pressable>
+                                    </View>
+                                  </View>
+                                )}
                               </View>
-                            )}
-                          </View>
-                        </Pressable>
+                            </View>
+                          )}
+                        </View>
                       );
                     })}
                   </View>
@@ -1703,6 +1947,60 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(128,128,128,0.06)',
     borderWidth: 1.5,
     borderColor: 'transparent',
+  },
+  mobileSeriesCard: {
+    borderRadius: Spacing.two,
+    backgroundColor: 'rgba(128,128,128,0.06)',
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    overflow: 'hidden',
+  },
+  mobileSeriesHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+  },
+  mobileSeriesHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  mobileSummaryText: {
+    marginLeft: Spacing.one,
+    fontSize: 12,
+  },
+  mobileSeriesDetails: {
+    paddingBottom: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(128,128,128,0.15)',
+    paddingTop: Spacing.two,
+  },
+  mobileControlsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  mobileControlItem: {
+    alignItems: 'center',
+    gap: Spacing.half,
+  },
+  repsCounterBtnLarge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(128,128,128,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  repsCounterValueLarge: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    minWidth: 32,
+    textAlign: 'center',
   },
   seriesItemLeft: {
     flexDirection: 'row',

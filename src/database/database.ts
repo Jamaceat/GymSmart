@@ -23,6 +23,7 @@ export interface Exercise {
   initial_state: string | null; // serialized JSON of InitialStateConfig
   muscle_group?: string | null;
   muscles?: { muscle_id: string; intensity: MuscleIntensity }[];
+  weight?: number | null; // default weight if applicable
   created_at?: string;
   repsDisplay?: string;
   isAudit?: boolean;
@@ -49,6 +50,7 @@ export interface ExerciseCompletionAudit {
   exercise_name: string;
   set_index: number;
   repetitions: number;
+  weight?: number | null; // weight lifted in this set
   seconds_taken: number | null;
   routine_id: number;
   routine_name: string;
@@ -85,6 +87,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           video_url TEXT,
           initial_state TEXT,
           muscle_group TEXT,
+          weight REAL,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -138,6 +141,8 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           completed_sets TEXT,
           completed_exercises TEXT,
           set_times TEXT,
+          custom_reps TEXT,
+          custom_weights TEXT,
           PRIMARY KEY (meta_group_id, scheduled_date),
           FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
       );
@@ -148,6 +153,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
           exercise_name TEXT NOT NULL,
           set_index INTEGER NOT NULL,
           repetitions INTEGER NOT NULL,
+          weight REAL,
           seconds_taken INTEGER,
           routine_id INTEGER,
           routine_name TEXT NOT NULL,
@@ -181,6 +187,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
         { name: 'video_url', type: 'TEXT' },
         { name: 'initial_state', type: 'TEXT' },
         { name: 'muscle_group', type: 'TEXT' },
+        { name: 'weight', type: 'REAL' },
         { name: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
       ];
       for (const col of expectedColumns) {
@@ -212,6 +219,11 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
       await db.execAsync('ALTER TABLE session_progress ADD COLUMN custom_reps TEXT;');
     }
 
+    // Ensure custom_weights column exists in session_progress table
+    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('custom_weights')) {
+      await db.execAsync('ALTER TABLE session_progress ADD COLUMN custom_weights TEXT;');
+    }
+
     // Ensure set_index column exists in exercise_completion_audits table
     const auditsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(exercise_completion_audits);");
     const auditsColumns = auditsCheck.map(c => c.name);
@@ -224,6 +236,7 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
             exercise_name TEXT NOT NULL,
             set_index INTEGER NOT NULL,
             repetitions INTEGER NOT NULL,
+            weight REAL,
             seconds_taken INTEGER,
             routine_id INTEGER,
             routine_name TEXT NOT NULL,
@@ -244,6 +257,11 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
     // Ensure meta_group_item_id column exists in exercise_completion_audits table
     if (auditsColumns.length > 0 && !auditsColumns.includes('meta_group_item_id')) {
       await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN meta_group_item_id INTEGER;');
+    }
+
+    // Ensure weight column exists in exercise_completion_audits table
+    if (auditsColumns.length > 0 && !auditsColumns.includes('weight')) {
+      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN weight REAL;');
     }
 
     // Ensure meta_group_items has surrogate id instead of composite primary key
@@ -315,8 +333,8 @@ export async function insertExercise(
   let lastInsertRowId = 0;
   await db.withTransactionAsync(async () => {
     const result = await db.runAsync(
-      `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group, weight) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         exercise.name,
         exercise.default_sets,
@@ -326,6 +344,7 @@ export async function insertExercise(
         exercise.video_url,
         exercise.initial_state,
         exercise.muscle_group ?? null,
+        exercise.weight ?? null,
       ]
     );
     lastInsertRowId = result.lastInsertRowId;
@@ -357,7 +376,8 @@ export async function updateExercise(
         series_config = COALESCE(?, series_config),
         video_url = COALESCE(?, video_url),
         initial_state = COALESCE(?, initial_state),
-        muscle_group = COALESCE(?, muscle_group)
+        muscle_group = COALESCE(?, muscle_group),
+        weight = CASE WHEN ? = 1 THEN ? ELSE weight END
        WHERE id = ?`,
       [
         exercise.name ?? null,
@@ -368,6 +388,8 @@ export async function updateExercise(
         exercise.video_url ?? null,
         exercise.initial_state ?? null,
         exercise.muscle_group ?? null,
+        exercise.weight !== undefined ? 1 : 0,
+        exercise.weight ?? null,
         id,
       ]
     );
@@ -607,13 +629,14 @@ export async function insertExerciseCompletionAudit(
 ): Promise<number> {
   const result = await db.runAsync(
     `INSERT INTO exercise_completion_audits 
-     (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id) 
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       audit.exercise_id,
       audit.exercise_name,
       audit.set_index,
       audit.repetitions,
+      audit.weight ?? null,
       audit.seconds_taken,
       audit.routine_id,
       audit.routine_name,
@@ -681,6 +704,8 @@ export interface ExerciseProgressHistoryItem {
   completed_date: string;
   total_reps: number;
   routine_name: string;
+  max_weight?: number | null;
+  all_weights?: string | null;
 }
 
 export async function getExerciseProgressHistory(
@@ -693,6 +718,8 @@ export async function getExerciseProgressHistory(
       `SELECT 
          completed_date,
          SUM(repetitions) as total_reps,
+         MAX(weight) as max_weight,
+         GROUP_CONCAT(weight) as all_weights,
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_id = ? OR exercise_name = ?
@@ -705,11 +732,13 @@ export async function getExerciseProgressHistory(
       `SELECT 
          completed_date,
          SUM(repetitions) as total_reps,
+         MAX(weight) as max_weight,
+         GROUP_CONCAT(weight) as all_weights,
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_name = ?
        GROUP BY completed_date, routine_id
-        ORDER BY completed_date ASC`,
+       ORDER BY completed_date ASC`,
       [exerciseName]
     );
   }
@@ -866,8 +895,8 @@ export async function importBackupData(
             exerciseId = existing.id;
           } else {
             const result = await db.runAsync(
-              `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO exercises (name, default_sets, default_reps, is_constant, series_config, video_url, initial_state, muscle_group, weight, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 ex.name,
                 ex.default_sets ?? 3,
@@ -877,6 +906,7 @@ export async function importBackupData(
                 ex.video_url ?? null,
                 ex.initial_state ?? null,
                 ex.muscle_group ?? null,
+                ex.weight ?? null,
                 ex.created_at ?? new Date().toISOString()
               ]
             );
@@ -1021,13 +1051,14 @@ export async function importBackupData(
             if (!existingAudit) {
               await db.runAsync(
                 `INSERT INTO exercise_completion_audits 
-                 (exercise_id, exercise_name, set_index, repetitions, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                   mappedExId,
                   audit.exercise_name,
                   audit.set_index,
                   audit.repetitions,
+                  audit.weight ?? null,
                   audit.seconds_taken ?? null,
                   mappedRoutineId,
                   audit.routine_name,

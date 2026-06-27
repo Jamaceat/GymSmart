@@ -119,6 +119,7 @@ export function ExercisesView() {
               {isConstant
                 ? `${item.default_sets} series x ${item.default_reps} reps`
                 : `${item.default_sets} series variables`}
+              {item.weight !== null && item.weight !== undefined ? ` | ${item.weight} kg` : ''}
             </ThemedText>
           </View>
           <View style={styles.actionButtons}>
