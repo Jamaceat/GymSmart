@@ -353,9 +353,12 @@ export function AnatomySvg({
   const strokeColor = theme.backgroundElement; // Border between muscles
   const activeStrokeColor = '#ffffff';
 
-  const getMuscleColors = (muscleId: string) => {
-    // If active / pressed
-    if (activeMuscleId === muscleId) {
+  const getMuscleColors = (muscleId: string | string[]) => {
+    const ids = Array.isArray(muscleId) ? muscleId : [muscleId];
+
+    // If any of the IDs is active / pressed
+    const isActive = ids.some((id) => activeMuscleId === id);
+    if (isActive) {
       return {
         fill: '#3c87f7',
         stroke: activeStrokeColor,
@@ -363,9 +366,24 @@ export function AnatomySvg({
       };
     }
 
-    const selected = selectedMuscles.find((m) => m.muscle_id === muscleId);
-    if (selected) {
-      switch (selected.intensity) {
+    let highestIntensity: MuscleIntensity | null = null;
+    const intensityOrder: Record<MuscleIntensity, number> = {
+      primary: 3,
+      secondary: 2,
+      stabilizer: 1,
+    };
+
+    for (const id of ids) {
+      const selected = selectedMuscles.find((m) => m.muscle_id === id);
+      if (selected) {
+        if (!highestIntensity || intensityOrder[selected.intensity] > intensityOrder[highestIntensity]) {
+          highestIntensity = selected.intensity;
+        }
+      }
+    }
+
+    if (highestIntensity) {
+      switch (highestIntensity) {
         case 'primary':
           return { fill: '#3c87f7', stroke: strokeColor, strokeWidth: 1.5 };
         case 'secondary':
@@ -380,21 +398,22 @@ export function AnatomySvg({
 
   const renderFront = () => {
     // Helper to map Front Muscle IDs to paths in FRONT_PATHS
-    const renderFrontMuscle = (gymSmartId: string, pathGroup: keyof typeof FRONT_PATHS) => {
+    const renderFrontMuscle = (gymSmartId: string | string[], pathGroup: keyof typeof FRONT_PATHS) => {
       const colors = getMuscleColors(gymSmartId);
       const paths = FRONT_PATHS[pathGroup];
+      const primaryId = Array.isArray(gymSmartId) ? gymSmartId[0] : gymSmartId;
 
       if (Array.isArray(paths)) {
         return paths.map((d, index) => (
-          <Path key={`${gymSmartId}-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-${index}`} d={d} {...colors} />
         ));
       } else {
         // Has left/right separation
         const leftPaths = (paths.left || []).map((d, index) => (
-          <Path key={`${gymSmartId}-l-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-l-${index}`} d={d} {...colors} />
         ));
         const rightPaths = (paths.right || []).map((d, index) => (
-          <Path key={`${gymSmartId}-r-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-r-${index}`} d={d} {...colors} />
         ));
         return [...leftPaths, ...rightPaths];
       }
@@ -429,10 +448,8 @@ export function AnatomySvg({
         {FRONT_PATHS.feet.right.map((d, i) => <Path key={`foot-r-${i}`} d={d} fill={neutralColor} stroke={strokeColor} strokeWidth={1.2} />)}
 
         {/* Muscles */}
-        {renderFrontMuscle('pectoral_superior', 'pectoral')}
-        {renderFrontMuscle('pectoral_inferior', 'pectoral')}
-        {renderFrontMuscle('deltoides_anterior', 'deltoides')}
-        {renderFrontMuscle('deltoides_lateral', 'deltoides')}
+        {renderFrontMuscle(['pectoral_superior', 'pectoral_inferior'], 'pectoral')}
+        {renderFrontMuscle(['deltoides_anterior', 'deltoides_lateral'], 'deltoides')}
         {renderFrontMuscle('biceps', 'biceps')}
         {renderFrontMuscle('antebrazos', 'forearm')}
         {renderFrontMuscle('abdomen', 'abs')}
@@ -445,21 +462,22 @@ export function AnatomySvg({
   };
 
   const renderBack = () => {
-    const renderBackMuscle = (gymSmartId: string, pathGroup: keyof typeof BACK_PATHS) => {
+    const renderBackMuscle = (gymSmartId: string | string[], pathGroup: keyof typeof BACK_PATHS) => {
       const colors = getMuscleColors(gymSmartId);
       const paths = BACK_PATHS[pathGroup];
+      const primaryId = Array.isArray(gymSmartId) ? gymSmartId[0] : gymSmartId;
 
       if (Array.isArray(paths)) {
         return paths.map((d, index) => (
-          <Path key={`${gymSmartId}-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-${index}`} d={d} {...colors} />
         ));
       } else {
         // Has left/right separation
         const leftPaths = (paths.left || []).map((d, index) => (
-          <Path key={`${gymSmartId}-l-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-l-${index}`} d={d} {...colors} />
         ));
         const rightPaths = (paths.right || []).map((d, index) => (
-          <Path key={`${gymSmartId}-r-${index}`} d={d} {...colors} />
+          <Path key={`${primaryId}-r-${index}`} d={d} {...colors} />
         ));
         return [...leftPaths, ...rightPaths];
       }
@@ -507,10 +525,8 @@ export function AnatomySvg({
         {BACK_PATHS.feet.right.map((d, i) => <Path key={`foot-back-r-${i}`} d={d} fill={neutralColor} stroke={strokeColor} strokeWidth={1.2} />)}
 
         {/* Muscles */}
-        {renderBackMuscle('trapecio_superior', 'trapezius')}
-        {renderBackMuscle('trapecio_medio_inferior', 'trapezius')}
-        {renderBackMuscle('deltoides_posterior', 'deltoids')}
-        {renderBackMuscle('deltoides_lateral', 'deltoids')}
+        {renderBackMuscle(['trapecio_superior', 'trapecio_medio_inferior'], 'trapezius')}
+        {renderBackMuscle(['deltoides_posterior', 'deltoides_lateral'], 'deltoids')}
         {renderBackMuscle('dorsales', 'dorsales')}
         {renderBackMuscle('triceps', 'triceps')}
         {renderBackMuscle('antebrazos', 'forearm')}
