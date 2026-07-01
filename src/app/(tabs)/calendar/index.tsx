@@ -147,7 +147,7 @@ export default function CalendarScreen() {
       if (expandedRoutineId !== null) {
         const currentExpanded = mergedRoutines.find(r => r.id === expandedRoutineId);
         if (currentExpanded) {
-          await refreshExpandedRoutineDetails(currentExpanded.meta_group_id, currentExpanded.scheduled_date);
+          await refreshExpandedRoutineDetails(currentExpanded.meta_group_id, currentExpanded.scheduled_date, currentExpanded.id);
         } else {
           setExpandedRoutineId(null);
           setExpandedRoutineDetails(null);
@@ -167,7 +167,7 @@ export default function CalendarScreen() {
   );
 
   // Helper to load complete routine metadata with exercise details
-  const refreshExpandedRoutineDetails = async (metaGroupId: number, dateStr: string) => {
+  const refreshExpandedRoutineDetails = async (metaGroupId: number, dateStr: string, scheduledRoutineId?: number) => {
     try {
       // 1. Fetch audits for this routine on this date
       const audits = await db.getAllAsync<{
@@ -183,10 +183,16 @@ export default function CalendarScreen() {
         group_name: string | null;
         meta_group_item_id: number | null;
       }>(
-        `SELECT * FROM exercise_completion_audits 
-         WHERE routine_id = ? AND completed_date = ? 
-         ORDER BY id ASC`,
-        [metaGroupId, dateStr]
+        scheduledRoutineId && scheduledRoutineId > 0
+          ? `SELECT * FROM exercise_completion_audits 
+             WHERE scheduled_routine_id = ? 
+             ORDER BY id ASC`
+          : `SELECT * FROM exercise_completion_audits 
+             WHERE routine_id = ? AND completed_date = ? 
+             ORDER BY id ASC`,
+        scheduledRoutineId && scheduledRoutineId > 0
+          ? [scheduledRoutineId]
+          : [metaGroupId, dateStr]
       );
 
       // 2. Try to load the live routine template
@@ -446,7 +452,7 @@ export default function CalendarScreen() {
       setExpandedRoutineDetails(null);
     } else {
       setExpandedRoutineId(scheduledId);
-      await refreshExpandedRoutineDetails(metaGroupId, dateStr);
+      await refreshExpandedRoutineDetails(metaGroupId, dateStr, scheduledId);
     }
   };
 
@@ -740,7 +746,11 @@ export default function CalendarScreen() {
                           onPress={() => {
                             router.push({
                               pathname: '/workout/session' as any,
-                              params: { metaGroupId: sr.meta_group_id, date: selectedDateStr }
+                              params: { 
+                                metaGroupId: sr.meta_group_id, 
+                                date: selectedDateStr,
+                                scheduledRoutineId: sr.id
+                              }
                             });
                           }}
                           style={({ pressed }) => [styles.playBtn, pressed && styles.pressed]}
@@ -878,7 +888,11 @@ export default function CalendarScreen() {
                                 onPress={() => {
                                   router.push({
                                     pathname: '/workout/session' as any,
-                                    params: { metaGroupId: sr.meta_group_id, date: selectedDateStr }
+                                    params: { 
+                                      metaGroupId: sr.meta_group_id, 
+                                      date: selectedDateStr,
+                                      scheduledRoutineId: sr.id
+                                    }
                                   });
                                 }}
                                 style={({ pressed }) => [

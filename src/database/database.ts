@@ -57,6 +57,7 @@ export interface ExerciseCompletionAudit {
   completed_date: string; // YYYY-MM-DD
   group_name?: string | null;
   meta_group_item_id?: number | null;
+  scheduled_routine_id?: number | null;
   created_at?: string;
 }
 
@@ -68,169 +69,96 @@ export interface ExerciseStatItem {
   historical_max_reps: number;
 }
 
+const CURRENT_DB_VERSION = 1;
+
 // Database version control and migrations
 export async function migrateDbIfNeeded(db: SQLiteDatabase) {
   try {
-    // Always enable foreign keys first
     await db.execAsync('PRAGMA foreign_keys = ON;');
 
-    // Unconditionally run CREATE TABLE IF NOT EXISTS for all tables to ensure they all exist.
-    // In SQLite, this is a fast no-op if the table already exists.
-    await db.execAsync(`
-      CREATE TABLE IF NOT EXISTS exercises (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          default_sets INTEGER NOT NULL DEFAULT 3,
-          default_reps INTEGER NOT NULL DEFAULT 10,
-          is_constant INTEGER NOT NULL DEFAULT 1,
-          series_config TEXT,
-          video_url TEXT,
-          initial_state TEXT,
-          muscle_group TEXT,
-          weight REAL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
+    const versionRow = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version;');
+    const currentVersion = versionRow?.user_version ?? 0;
 
-      CREATE TABLE IF NOT EXISTS exercise_groups (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
+    if (currentVersion >= CURRENT_DB_VERSION) return;
 
-      CREATE TABLE IF NOT EXISTS group_exercises (
-          group_id INTEGER,
-          exercise_id INTEGER,
-          order_index INTEGER NOT NULL,
-          PRIMARY KEY (group_id, exercise_id),
-          FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE,
-          FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS meta_groups (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS meta_group_items (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          meta_group_id INTEGER,
-          group_id INTEGER,
-          order_index INTEGER NOT NULL,
-          FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
-          FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS scheduled_routines (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          meta_group_id INTEGER NOT NULL,
-          scheduled_date TEXT NOT NULL,
-          is_completed INTEGER DEFAULT 0,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS session_progress (
-          meta_group_id INTEGER,
-          scheduled_date TEXT,
-          active_index INTEGER,
-          active_seconds INTEGER,
-          rest_seconds INTEGER,
-          is_resting INTEGER,
-          current_set INTEGER,
-          completed_sets TEXT,
-          completed_exercises TEXT,
-          set_times TEXT,
-          custom_reps TEXT,
-          custom_weights TEXT,
-          PRIMARY KEY (meta_group_id, scheduled_date),
-          FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS exercise_completion_audits (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          exercise_id INTEGER,
-          exercise_name TEXT NOT NULL,
-          set_index INTEGER NOT NULL,
-          repetitions INTEGER NOT NULL,
-          weight REAL,
-          seconds_taken INTEGER,
-          routine_id INTEGER,
-          routine_name TEXT NOT NULL,
-          completed_date TEXT NOT NULL,
-          group_name TEXT,
-          meta_group_item_id INTEGER,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS exercise_muscles (
-          exercise_id INTEGER,
-          muscle_id TEXT NOT NULL,
-          intensity TEXT NOT NULL,
-          PRIMARY KEY (exercise_id, muscle_id),
-          FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);
-    `);
-
-    // Ensure all columns exist in the exercises table in case it was created in an older code version
-    const columnsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(exercises);");
-    const columnNames = columnsCheck.map(c => c.name);
-
-    if (columnNames.length > 0) {
-      const expectedColumns = [
-        { name: 'default_sets', type: 'INTEGER NOT NULL DEFAULT 3' },
-        { name: 'default_reps', type: 'INTEGER NOT NULL DEFAULT 10' },
-        { name: 'is_constant', type: 'INTEGER NOT NULL DEFAULT 1' },
-        { name: 'series_config', type: 'TEXT' },
-        { name: 'video_url', type: 'TEXT' },
-        { name: 'initial_state', type: 'TEXT' },
-        { name: 'muscle_group', type: 'TEXT' },
-        { name: 'weight', type: 'REAL' },
-        { name: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
-      ];
-      for (const col of expectedColumns) {
-        if (!columnNames.includes(col.name)) {
-          await db.execAsync(`ALTER TABLE exercises ADD COLUMN ${col.name} ${col.type};`);
-        }
-      }
-    }
-
-    // Ensure all columns exist in the scheduled_routines table
-    const scheduledRoutinesCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(scheduled_routines);");
-    const scheduledRoutinesColumns = scheduledRoutinesCheck.map(c => c.name);
-
-    if (scheduledRoutinesColumns.length > 0) {
-      if (!scheduledRoutinesColumns.includes('is_completed')) {
-        await db.execAsync('ALTER TABLE scheduled_routines ADD COLUMN is_completed INTEGER DEFAULT 0;');
-      }
-    }
-
-    // Ensure set_times column exists in session_progress table
-    const sessionProgressCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(session_progress);");
-    const sessionProgressColumns = sessionProgressCheck.map(c => c.name);
-    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('set_times')) {
-      await db.execAsync('ALTER TABLE session_progress ADD COLUMN set_times TEXT;');
-    }
-
-    // Ensure custom_reps column exists in session_progress table
-    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('custom_reps')) {
-      await db.execAsync('ALTER TABLE session_progress ADD COLUMN custom_reps TEXT;');
-    }
-
-    // Ensure custom_weights column exists in session_progress table
-    if (sessionProgressColumns.length > 0 && !sessionProgressColumns.includes('custom_weights')) {
-      await db.execAsync('ALTER TABLE session_progress ADD COLUMN custom_weights TEXT;');
-    }
-
-    // Ensure set_index column exists in exercise_completion_audits table
-    const auditsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(exercise_completion_audits);");
-    const auditsColumns = auditsCheck.map(c => c.name);
-    if (auditsColumns.length > 0 && !auditsColumns.includes('set_index')) {
-      await db.execAsync('DROP TABLE exercise_completion_audits;');
+    // Migration 0 → 1: initial schema + incremental column backfills for pre-versioned installs
+    if (currentVersion < 1) {
       await db.execAsync(`
-        CREATE TABLE exercise_completion_audits (
+        CREATE TABLE IF NOT EXISTS exercises (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            default_sets INTEGER NOT NULL DEFAULT 3,
+            default_reps INTEGER NOT NULL DEFAULT 10,
+            is_constant INTEGER NOT NULL DEFAULT 1,
+            series_config TEXT,
+            video_url TEXT,
+            initial_state TEXT,
+            muscle_group TEXT,
+            weight REAL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS exercise_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS group_exercises (
+            group_id INTEGER,
+            exercise_id INTEGER,
+            order_index INTEGER NOT NULL,
+            PRIMARY KEY (group_id, exercise_id),
+            FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS meta_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS meta_group_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meta_group_id INTEGER,
+            group_id INTEGER,
+            order_index INTEGER NOT NULL,
+            FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduled_routines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meta_group_id INTEGER NOT NULL,
+            scheduled_date TEXT NOT NULL,
+            is_completed INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS session_progress (
+            meta_group_id INTEGER,
+            scheduled_date TEXT,
+            scheduled_routine_id INTEGER DEFAULT 0,
+            active_index INTEGER,
+            active_seconds INTEGER,
+            rest_seconds INTEGER,
+            is_resting INTEGER,
+            current_set INTEGER,
+            completed_sets TEXT,
+            completed_exercises TEXT,
+            set_times TEXT,
+            custom_reps TEXT,
+            custom_weights TEXT,
+            extra_sets TEXT,
+            adhoc_exercises TEXT,
+            deleted_sets TEXT,
+            PRIMARY KEY (meta_group_id, scheduled_date, scheduled_routine_id),
+            FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS exercise_completion_audits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             exercise_id INTEGER,
             exercise_name TEXT NOT NULL,
@@ -243,53 +171,157 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
             completed_date TEXT NOT NULL,
             group_name TEXT,
             meta_group_item_id INTEGER,
+            scheduled_routine_id INTEGER,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-      `);
-      await db.execAsync('CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);');
-    }
 
-    // Ensure group_name column exists in exercise_completion_audits table
-    if (auditsColumns.length > 0 && !auditsColumns.includes('group_name')) {
-      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN group_name TEXT;');
-    }
-
-    // Ensure meta_group_item_id column exists in exercise_completion_audits table
-    if (auditsColumns.length > 0 && !auditsColumns.includes('meta_group_item_id')) {
-      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN meta_group_item_id INTEGER;');
-    }
-
-    // Ensure weight column exists in exercise_completion_audits table
-    if (auditsColumns.length > 0 && !auditsColumns.includes('weight')) {
-      await db.execAsync('ALTER TABLE exercise_completion_audits ADD COLUMN weight REAL;');
-    }
-
-    // Ensure meta_group_items has surrogate id instead of composite primary key
-    const metaGroupItemsCheck = await db.getAllAsync<{ name: string }>("PRAGMA table_info(meta_group_items);");
-    const metaGroupItemsColumns = metaGroupItemsCheck.map(c => c.name);
-
-    if (metaGroupItemsColumns.length > 0 && !metaGroupItemsColumns.includes('id')) {
-      await db.execAsync(`
-        ALTER TABLE meta_group_items RENAME TO meta_group_items_old;
-
-        CREATE TABLE meta_group_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            meta_group_id INTEGER,
-            group_id INTEGER,
-            order_index INTEGER NOT NULL,
-            FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
-            FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
+        CREATE TABLE IF NOT EXISTS exercise_muscles (
+            exercise_id INTEGER,
+            muscle_id TEXT NOT NULL,
+            intensity TEXT NOT NULL,
+            PRIMARY KEY (exercise_id, muscle_id),
+            FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE
         );
 
-        INSERT INTO meta_group_items (meta_group_id, group_id, order_index)
-        SELECT meta_group_id, group_id, order_index FROM meta_group_items_old;
-
-        DROP TABLE meta_group_items_old;
+        CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);
       `);
+
+      // Backfills for installs that existed before user_version was tracked
+      const exerciseCols = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(exercises);')).map(c => c.name);
+      for (const col of [
+        { name: 'default_sets', type: 'INTEGER NOT NULL DEFAULT 3' },
+        { name: 'default_reps', type: 'INTEGER NOT NULL DEFAULT 10' },
+        { name: 'is_constant', type: 'INTEGER NOT NULL DEFAULT 1' },
+        { name: 'series_config', type: 'TEXT' },
+        { name: 'video_url', type: 'TEXT' },
+        { name: 'initial_state', type: 'TEXT' },
+        { name: 'muscle_group', type: 'TEXT' },
+        { name: 'weight', type: 'REAL' },
+        { name: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP' },
+      ]) {
+        if (!exerciseCols.includes(col.name)) {
+          await db.execAsync(`ALTER TABLE exercises ADD COLUMN ${col.name} ${col.type};`);
+        }
+      }
+
+      const scheduledCols = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(scheduled_routines);')).map(c => c.name);
+      if (scheduledCols.length > 0 && !scheduledCols.includes('is_completed')) {
+        await db.execAsync('ALTER TABLE scheduled_routines ADD COLUMN is_completed INTEGER DEFAULT 0;');
+      }
+
+      const sessionCols = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(session_progress);')).map(c => c.name);
+      if (sessionCols.length > 0) {
+        if (!sessionCols.includes('scheduled_routine_id')) {
+          await db.execAsync(`
+            ALTER TABLE session_progress RENAME TO session_progress_old;
+
+            CREATE TABLE session_progress (
+                meta_group_id INTEGER,
+                scheduled_date TEXT,
+                scheduled_routine_id INTEGER DEFAULT 0,
+                active_index INTEGER,
+                active_seconds INTEGER,
+                rest_seconds INTEGER,
+                is_resting INTEGER,
+                current_set INTEGER,
+                completed_sets TEXT,
+                completed_exercises TEXT,
+                set_times TEXT,
+                custom_reps TEXT,
+                custom_weights TEXT,
+                extra_sets TEXT,
+                adhoc_exercises TEXT,
+                deleted_sets TEXT,
+                PRIMARY KEY (meta_group_id, scheduled_date, scheduled_routine_id),
+                FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE
+            );
+
+            INSERT INTO session_progress (
+              meta_group_id, scheduled_date, scheduled_routine_id, active_index, active_seconds,
+              rest_seconds, is_resting, current_set, completed_sets, completed_exercises,
+              set_times, custom_reps, custom_weights
+            )
+            SELECT
+              meta_group_id, scheduled_date, 0, active_index, active_seconds,
+              rest_seconds, is_resting, current_set, completed_sets, completed_exercises,
+              set_times, custom_reps, custom_weights
+            FROM session_progress_old;
+
+            DROP TABLE session_progress_old;
+          `);
+        } else {
+          for (const col of ['set_times', 'custom_reps', 'custom_weights', 'extra_sets', 'adhoc_exercises', 'deleted_sets']) {
+            if (!sessionCols.includes(col)) {
+              await db.execAsync(`ALTER TABLE session_progress ADD COLUMN ${col} TEXT;`);
+            }
+          }
+        }
+      }
+
+      const auditCols = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(exercise_completion_audits);')).map(c => c.name);
+      if (auditCols.length > 0) {
+        if (!auditCols.includes('set_index')) {
+          await db.execAsync('DROP TABLE exercise_completion_audits;');
+          await db.execAsync(`
+            CREATE TABLE exercise_completion_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exercise_id INTEGER,
+                exercise_name TEXT NOT NULL,
+                set_index INTEGER NOT NULL,
+                repetitions INTEGER NOT NULL,
+                weight REAL,
+                seconds_taken INTEGER,
+                routine_id INTEGER,
+                routine_name TEXT NOT NULL,
+                completed_date TEXT NOT NULL,
+                group_name TEXT,
+                meta_group_item_id INTEGER,
+                scheduled_routine_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_exercise_completion_audits_date ON exercise_completion_audits (completed_date);
+          `);
+        } else {
+          for (const col of [
+            { name: 'group_name', type: 'TEXT' },
+            { name: 'meta_group_item_id', type: 'INTEGER' },
+            { name: 'weight', type: 'REAL' },
+            { name: 'scheduled_routine_id', type: 'INTEGER' },
+          ]) {
+            if (!auditCols.includes(col.name)) {
+              await db.execAsync(`ALTER TABLE exercise_completion_audits ADD COLUMN ${col.name} ${col.type};`);
+            }
+          }
+        }
+      }
+
+      const metaItemCols = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(meta_group_items);')).map(c => c.name);
+      if (metaItemCols.length > 0 && !metaItemCols.includes('id')) {
+        await db.execAsync(`
+          ALTER TABLE meta_group_items RENAME TO meta_group_items_old;
+
+          CREATE TABLE meta_group_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              meta_group_id INTEGER,
+              group_id INTEGER,
+              order_index INTEGER NOT NULL,
+              FOREIGN KEY (meta_group_id) REFERENCES meta_groups(id) ON DELETE CASCADE,
+              FOREIGN KEY (group_id) REFERENCES exercise_groups(id) ON DELETE CASCADE
+          );
+
+          INSERT INTO meta_group_items (meta_group_id, group_id, order_index)
+          SELECT meta_group_id, group_id, order_index FROM meta_group_items_old;
+
+          DROP TABLE meta_group_items_old;
+        `);
+      }
+
+      await db.execAsync('PRAGMA user_version = 1;');
     }
 
-    // Set user_version to 1
-    await db.execAsync('PRAGMA user_version = 1;');
+    // Add future migrations here:
+    // if (currentVersion < 2) { ...; await db.execAsync('PRAGMA user_version = 2;'); }
+
   } catch (error) {
     console.error('CRITICAL DATABASE MIGRATION ERROR:', error);
     throw error;
@@ -602,20 +634,28 @@ export async function deleteScheduledRoutine(
   await db.withTransactionAsync(async () => {
     if (id > 0) {
       await db.runAsync('DELETE FROM scheduled_routines WHERE id = ?', [id]);
+      await db.runAsync(
+        'DELETE FROM exercise_completion_audits WHERE scheduled_routine_id = ?',
+        [id]
+      );
+      await db.runAsync(
+        'DELETE FROM session_progress WHERE scheduled_routine_id = ?',
+        [id]
+      );
     } else {
       await db.runAsync(
         'DELETE FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ?',
         [metaGroupId, date]
       );
+      await db.runAsync(
+        'DELETE FROM exercise_completion_audits WHERE routine_id = ? AND completed_date = ?',
+        [metaGroupId, date]
+      );
+      await db.runAsync(
+        'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
+        [metaGroupId, date]
+      );
     }
-    await db.runAsync(
-      'DELETE FROM exercise_completion_audits WHERE routine_id = ? AND completed_date = ?',
-      [metaGroupId, date]
-    );
-    await db.runAsync(
-      'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
-      [metaGroupId, date]
-    );
   });
 }
 
@@ -629,8 +669,8 @@ export async function insertExerciseCompletionAudit(
 ): Promise<number> {
   const result = await db.runAsync(
     `INSERT INTO exercise_completion_audits 
-     (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id) 
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, scheduled_routine_id) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       audit.exercise_id,
       audit.exercise_name,
@@ -643,6 +683,7 @@ export async function insertExerciseCompletionAudit(
       audit.completed_date,
       audit.group_name ?? null,
       audit.meta_group_item_id ?? null,
+      audit.scheduled_routine_id ?? null,
     ]
   );
   return result.lastInsertRowId;
@@ -888,6 +929,7 @@ export async function importBackupData(
       const groupIdMap: Record<number, number> = {};
       const routineIdMap: Record<number, number> = {};
       const metaGroupItemIdMap: Record<number, number> = {};
+      const scheduledRoutineIdMap: Record<number, number> = {};
 
       // 1. Import Exercises
       if (payload.exercises && payload.exercises.length > 0) {
@@ -1017,11 +1059,14 @@ export async function importBackupData(
             const mappedMetaGroupId = routineIdMap[sr.meta_group_id];
             if (mappedMetaGroupId) {
               const existingSR = await db.getFirstAsync<{ id: number }>(
-                'SELECT id FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ?',
-                [mappedMetaGroupId, sr.scheduled_date]
+                'SELECT id FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ? AND is_completed = ?',
+                [mappedMetaGroupId, sr.scheduled_date, sr.is_completed ?? 0]
               );
-              if (!existingSR) {
-                await db.runAsync(
+              let scheduledId: number;
+              if (existingSR) {
+                scheduledId = existingSR.id;
+              } else {
+                const result = await db.runAsync(
                   'INSERT INTO scheduled_routines (meta_group_id, scheduled_date, is_completed, created_at) VALUES (?, ?, ?, ?)',
                   [
                     mappedMetaGroupId,
@@ -1030,7 +1075,9 @@ export async function importBackupData(
                     sr.created_at ?? new Date().toISOString()
                   ]
                 );
+                scheduledId = result.lastInsertRowId;
               }
+              scheduledRoutineIdMap[sr.id] = scheduledId;
             }
           }
         }
@@ -1040,25 +1087,28 @@ export async function importBackupData(
             const mappedExId = audit.exercise_id ? exerciseIdMap[audit.exercise_id] : null;
             const mappedRoutineId = audit.routine_id ? routineIdMap[audit.routine_id] : null;
             const mappedMetaGroupItemId = audit.meta_group_item_id ? metaGroupItemIdMap[audit.meta_group_item_id] : null;
+            const mappedScheduledRoutineId = audit.scheduled_routine_id ? scheduledRoutineIdMap[audit.scheduled_routine_id] : null;
 
             // Evitar duplicados de auditoría
             const existingAudit = await db.getFirstAsync<{ id: number }>(
               `SELECT id FROM exercise_completion_audits 
-               WHERE completed_date = ? AND exercise_name = ? AND set_index = ? AND routine_name = ? AND repetitions = ?`,
+               WHERE completed_date = ? AND exercise_name = ? AND set_index = ? AND routine_name = ? AND repetitions = ? AND (scheduled_routine_id = ? OR (scheduled_routine_id IS NULL AND ? IS NULL))`,
               [
                 audit.completed_date,
                 audit.exercise_name,
                 audit.set_index,
                 audit.routine_name,
-                audit.repetitions
+                audit.repetitions,
+                mappedScheduledRoutineId,
+                mappedScheduledRoutineId
               ]
             );
 
             if (!existingAudit) {
               await db.runAsync(
                 `INSERT INTO exercise_completion_audits 
-                 (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (exercise_id, exercise_name, set_index, repetitions, weight, seconds_taken, routine_id, routine_name, completed_date, group_name, meta_group_item_id, scheduled_routine_id, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                   mappedExId,
                   audit.exercise_name,
@@ -1071,6 +1121,7 @@ export async function importBackupData(
                   audit.completed_date,
                   audit.group_name ?? null,
                   mappedMetaGroupItemId,
+                  mappedScheduledRoutineId,
                   audit.created_at ?? new Date().toISOString()
                 ]
               );

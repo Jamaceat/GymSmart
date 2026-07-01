@@ -10,6 +10,7 @@ import {
   useWindowDimensions,
   ActivityIndicator,
   Linking,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -24,6 +25,8 @@ import { getMuscleName, MuscleIntensity } from '@/constants/muscle-groups';
 import {
   getMetaGroupWithGroups,
   getGroupWithExercises,
+  getExercises,
+  getExerciseById,
   MetaGroup,
   ExerciseGroup,
   Exercise,
@@ -32,10 +35,17 @@ import {
 import { useAlert } from '@/components/ui/alert-provider';
 
 interface SessionExercise {
-  uniqueId: string; // `${metaGroupItemId}-${exercise.id}`
+  uniqueId: string; // `${metaGroupItemId}-${exercise.id}` or `adhoc-${timestamp}-${exercise.id}`
   exercise: Exercise;
   groupName: string;
   metaGroupItemId: number;
+  isAdhoc?: boolean;
+}
+
+interface AdhocExerciseInfo {
+  uniqueId: string;
+  exerciseId: number;
+  groupName: string;
 }
 
 function calculateTotalReps(exercise: Exercise): number {
@@ -53,11 +63,11 @@ function calculateTotalReps(exercise: Exercise): number {
   return (exercise.default_sets || 0) * (exercise.default_reps || 0);
 }
 
-function getNextSetToComplete(completed: Set<number>, totalSets: number): number {
-  for (let i = 1; i <= totalSets; i++) {
-    if (!completed.has(i)) return i;
+function getNextSetToComplete(completed: Set<number>, seriesConfig: { set: number; reps: number }[]): number {
+  for (const item of seriesConfig) {
+    if (!completed.has(item.set)) return item.set;
   }
-  return totalSets > 0 ? totalSets : 1;
+  return seriesConfig.length > 0 ? seriesConfig[seriesConfig.length - 1].set : 1;
 }
 
 export default function WorkoutSessionScreen() {
@@ -69,7 +79,11 @@ export default function WorkoutSessionScreen() {
   const isTablet = width > 768;
 
   // Search parameters
-  const { metaGroupId, date } = useLocalSearchParams<{ metaGroupId: string; date: string }>();
+  const { metaGroupId, date, scheduledRoutineId } = useLocalSearchParams<{
+    metaGroupId: string;
+    date: string;
+    scheduledRoutineId?: string;
+  }>();
 
   // Routine and layout state
   const [metaGroup, setMetaGroup] = useState<MetaGroup | null>(null);
@@ -89,6 +103,13 @@ export default function WorkoutSessionScreen() {
   const [customReps, setCustomReps] = useState<Record<string, Record<number, number>>>({});
   const [customWeights, setCustomWeights] = useState<Record<string, Record<number, number>>>({});
   const [expandedSets, setExpandedSets] = useState<Record<number, boolean>>({});
+  const [extraSetsPerExercise, setExtraSetsPerExercise] = useState<Record<string, number>>({});
+  const [deletedSetsPerExercise, setDeletedSetsPerExercise] = useState<Record<string, number[]>>({});
+
+  // Add exercise to session modal state
+  const [isAddExerciseOpen, setIsAddExerciseOpen] = useState(false);
+  const [allExercises, setAllExercises] = useState<Exercise[]>([]);
+  const [exerciseSearch, setExerciseSearch] = useState('');
 
   // Timer State
   const [activeSeconds, setActiveSeconds] = useState<number>(0);
@@ -117,6 +138,9 @@ export default function WorkoutSessionScreen() {
     allSetTimes,
     customReps,
     customWeights,
+    extraSetsPerExercise,
+    deletedSetsPerExercise,
+    adhocExerciseInfos: [] as AdhocExerciseInfo[],
   });
 
   useEffect(() => {
@@ -131,8 +155,13 @@ export default function WorkoutSessionScreen() {
       allSetTimes,
       customReps,
       customWeights,
+      extraSetsPerExercise,
+      deletedSetsPerExercise,
+      adhocExerciseInfos: sessionExercises
+        .filter(e => e.isAdhoc)
+        .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName })),
     };
-  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, allCompletedSets, completedExercises, allSetTimes, customReps, customWeights]);
+  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, allCompletedSets, completedExercises, allSetTimes, customReps, customWeights, extraSetsPerExercise, deletedSetsPerExercise, sessionExercises]);
 
   // Flattened active exercise helper
   const activeSessionItem = sessionExercises[activeIndex] || null;
@@ -173,7 +202,10 @@ export default function WorkoutSessionScreen() {
       doneExs: Set<string>,
       timesMap?: Record<string, Record<number, number>>,
       customRepsMap?: Record<string, Record<number, number>>,
-      customWeightsMap?: Record<string, Record<number, number>>
+      customWeightsMap?: Record<string, Record<number, number>>,
+      extraSetsOverride?: Record<string, number>,
+      adhocInfosOverride?: AdhocExerciseInfo[],
+      deletedSetsOverride?: Record<string, number[]>
     ) => {
       try {
         const doneSetsStr = JSON.stringify(doneSetsMap);
@@ -184,13 +216,21 @@ export default function WorkoutSessionScreen() {
         const customRepsStr = JSON.stringify(currentCustomReps);
         const currentCustomWeights = customWeightsMap || stateRef.current.customWeights || {};
         const customWeightsStr = JSON.stringify(currentCustomWeights);
+        const currentExtraSets = extraSetsOverride ?? stateRef.current.extraSetsPerExercise ?? {};
+        const extraSetsStr = JSON.stringify(currentExtraSets);
+        const currentAdhocInfos = adhocInfosOverride ?? stateRef.current.adhocExerciseInfos ?? [];
+        const adhocExsStr = JSON.stringify(currentAdhocInfos);
+        const currentDeletedSets = deletedSetsOverride ?? stateRef.current.deletedSetsPerExercise ?? {};
+        const deletedSetsStr = JSON.stringify(currentDeletedSets);
+        const schedId = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
         await db.runAsync(
-          `INSERT OR REPLACE INTO session_progress 
-            (meta_group_id, scheduled_date, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times, custom_reps, custom_weights) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO session_progress
+            (meta_group_id, scheduled_date, scheduled_routine_id, active_index, active_seconds, rest_seconds, is_resting, current_set, completed_sets, completed_exercises, set_times, custom_reps, custom_weights, extra_sets, adhoc_exercises, deleted_sets)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             parseInt(metaGroupId!, 10),
             date,
+            schedId,
             idx,
             activeSecs,
             restSecs,
@@ -201,26 +241,37 @@ export default function WorkoutSessionScreen() {
             setTimesStr,
             customRepsStr,
             customWeightsStr,
+            extraSetsStr,
+            adhocExsStr,
+            deletedSetsStr,
           ]
         );
       } catch (e) {
         console.error('Error saving session progress:', e);
       }
     },
-    [db, metaGroupId, date]
+    [db, metaGroupId, date, scheduledRoutineId]
   );
 
   // Clear progress callback
   const clearSessionProgress = useCallback(async () => {
     try {
-      await db.runAsync(
-        'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
-        [parseInt(metaGroupId!, 10), date]
-      );
+      const schedId = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
+      if (schedId > 0) {
+        await db.runAsync(
+          'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ? AND scheduled_routine_id = ?',
+          [parseInt(metaGroupId!, 10), date, schedId]
+        );
+      } else {
+        await db.runAsync(
+          'DELETE FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ? AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)',
+          [parseInt(metaGroupId!, 10), date]
+        );
+      }
     } catch (e) {
       console.error('Error clearing session progress:', e);
     }
-  }, [db, metaGroupId, date]);
+  }, [db, metaGroupId, date, scheduledRoutineId]);
 
   // Load routine and flatten exercises
   useEffect(() => {
@@ -237,7 +288,7 @@ export default function WorkoutSessionScreen() {
 
           if (routineData.groups && routineData.groups.length > 0) {
             const flattened: SessionExercise[] = [];
-            
+
             for (const group of routineData.groups) {
               const fullGroup = await getGroupWithExercises(db, group.id!);
               if (fullGroup && fullGroup.exercises && fullGroup.exercises.length > 0) {
@@ -251,9 +302,9 @@ export default function WorkoutSessionScreen() {
                 }
               }
             }
-            setSessionExercises(flattened);
 
-            // Fetch progress from database
+            // Fetch progress from database (before setSessionExercises so we can include adhoc)
+            const schedId = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
             const progress = await db.getFirstAsync<{
               active_index: number;
               active_seconds: number;
@@ -265,9 +316,16 @@ export default function WorkoutSessionScreen() {
               set_times: string | null;
               custom_reps: string | null;
               custom_weights: string | null;
+              extra_sets: string | null;
+              adhoc_exercises: string | null;
+              deleted_sets: string | null;
             }>(
-              'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ?',
-              [mGroupId, date]
+              schedId > 0
+                ? 'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ? AND scheduled_routine_id = ?'
+                : 'SELECT * FROM session_progress WHERE meta_group_id = ? AND scheduled_date = ? AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)',
+              schedId > 0
+                ? [mGroupId, date, schedId]
+                : [mGroupId, date]
             );
 
             if (progress) {
@@ -359,6 +417,47 @@ export default function WorkoutSessionScreen() {
               } else {
                 setCustomWeights({});
               }
+
+              if (progress.extra_sets) {
+                try {
+                  setExtraSetsPerExercise(JSON.parse(progress.extra_sets));
+                } catch (e) {
+                  setExtraSetsPerExercise({});
+                }
+              } else {
+                setExtraSetsPerExercise({});
+              }
+
+              if (progress.deleted_sets) {
+                try {
+                  setDeletedSetsPerExercise(JSON.parse(progress.deleted_sets));
+                } catch (e) {
+                  setDeletedSetsPerExercise({});
+                }
+              } else {
+                setDeletedSetsPerExercise({});
+              }
+
+              // Restore adhoc exercises and append them to the flat list
+              if (progress.adhoc_exercises) {
+                try {
+                  const adhocInfos = JSON.parse(progress.adhoc_exercises) as AdhocExerciseInfo[];
+                  for (const info of adhocInfos) {
+                    const exercise = await getExerciseById(db, info.exerciseId);
+                    if (exercise) {
+                      flattened.push({
+                        uniqueId: info.uniqueId,
+                        exercise,
+                        groupName: info.groupName,
+                        metaGroupItemId: 0,
+                        isAdhoc: true,
+                      });
+                    }
+                  }
+                } catch (e) {
+                  // ignore parse error
+                }
+              }
             } else {
               setActiveIndex(0);
               setCompletedExercises(new Set());
@@ -371,7 +470,11 @@ export default function WorkoutSessionScreen() {
               setRestSeconds(0);
               setIsResting(false);
               setIsRunning(false);
+              setExtraSetsPerExercise({});
+              setDeletedSetsPerExercise({});
             }
+
+            setSessionExercises(flattened);
           }
         }
       } catch (error) {
@@ -384,7 +487,7 @@ export default function WorkoutSessionScreen() {
     };
 
     loadRoutine();
-  }, [db, metaGroupId]);
+  }, [db, metaGroupId, date, scheduledRoutineId, alert]);
 
   // Unmount effect to save active timers & progress when leaving
   useEffect(() => {
@@ -405,27 +508,45 @@ export default function WorkoutSessionScreen() {
     };
   }, [saveProgress, sessionExercises.length]);
 
-  // Parse exercise series config
-  const parsedSeriesConfig = useMemo(() => {
-    if (!activeExercise) return [];
-    if (activeExercise.is_constant === 1) {
-      return Array.from({ length: activeExercise.default_sets }, (_, i) => ({
-        set: i + 1,
-        reps: activeExercise.default_reps,
-      }));
-    }
-    if (activeExercise.series_config) {
+  // Build the full series config for any session item, including ad-hoc extra sets
+  const buildSeriesConfig = useCallback((
+    item: SessionExercise,
+    extrasMap: Record<string, number>,
+    deletedMap: Record<string, number[]> = {}
+  ): { set: number; reps: number }[] => {
+    const ex = item.exercise;
+    let base: { set: number; reps: number }[] = [];
+    if (ex.is_constant === 1) {
+      base = Array.from({ length: ex.default_sets }, (_, i) => ({ set: i + 1, reps: ex.default_reps }));
+    } else if (ex.series_config) {
       try {
-        return JSON.parse(activeExercise.series_config) as { set: number; reps: number }[];
+        base = JSON.parse(ex.series_config) as { set: number; reps: number }[];
       } catch (e) {
         console.error('Failed to parse series_config:', e);
       }
     }
-    return [];
-  }, [activeExercise]);
+    const extras = extrasMap[item.uniqueId] || 0;
+    if (extras > 0) {
+      const lastReps = base.length > 0 ? base[base.length - 1].reps : (ex.default_reps || 10);
+      for (let i = 0; i < extras; i++) {
+        base.push({ set: base.length + 1, reps: lastReps });
+      }
+    }
+    const deleted = new Set(deletedMap[item.uniqueId] || []);
+    if (deleted.size > 0) {
+      base = base.filter(s => !deleted.has(s.set));
+    }
+    return base;
+  }, []);
+
+  // Parse exercise series config (active exercise + extra sets - deleted sets)
+  const parsedSeriesConfig = useMemo(() => {
+    if (!activeSessionItem) return [];
+    return buildSeriesConfig(activeSessionItem, extraSetsPerExercise, deletedSetsPerExercise);
+  }, [activeSessionItem, extraSetsPerExercise, deletedSetsPerExercise, buildSeriesConfig]);
 
   const isAllSetsCompleted = useMemo(() => {
-    return parsedSeriesConfig.length > 0 && completedSets.size === parsedSeriesConfig.length;
+    return parsedSeriesConfig.length > 0 && parsedSeriesConfig.every(s => completedSets.has(s.set));
   }, [completedSets, parsedSeriesConfig]);
 
   // Update default reset values when active exercise or series changes
@@ -448,12 +569,12 @@ export default function WorkoutSessionScreen() {
 
       if (activeExercise && activeSessionItem) {
         const itemCompletedSets = new Set(allCompletedSets[activeSessionItem.uniqueId] || []);
-        const nextSet = getNextSetToComplete(itemCompletedSets, parsedSeriesConfig.length);
+        const nextSet = getNextSetToComplete(itemCompletedSets, parsedSeriesConfig);
 
         setCurrentSet(nextSet);
         setExpandedSets({});
         setResetSet(nextSet);
-        const initialReps = parsedSeriesConfig[nextSet - 1]?.reps ?? activeExercise.default_reps ?? 10;
+        const initialReps = parsedSeriesConfig.find(s => s.set === nextSet)?.reps ?? activeExercise.default_reps ?? 10;
         setResetReps(initialReps);
         
         // Stop timers when switching exercises
@@ -481,10 +602,8 @@ export default function WorkoutSessionScreen() {
     const targetSessionItem = sessionExercises[idx];
     const targetCompletedSetsArray = targetSessionItem ? (allCompletedSets[targetSessionItem.uniqueId] || []) : [];
     const targetCompletedSets = new Set(targetCompletedSetsArray);
-    const targetSeriesConfig = targetSessionItem?.exercise.is_constant === 1
-      ? Array.from({ length: targetSessionItem.exercise.default_sets }, (_, i) => ({ set: i + 1, reps: targetSessionItem.exercise.default_reps }))
-      : (targetSessionItem?.exercise.series_config ? JSON.parse(targetSessionItem.exercise.series_config) : []);
-    const nextSet = getNextSetToComplete(targetCompletedSets, targetSeriesConfig.length);
+    const targetSeriesConfig = targetSessionItem ? buildSeriesConfig(targetSessionItem, extraSetsPerExercise, deletedSetsPerExercise) : [];
+    const nextSet = getNextSetToComplete(targetCompletedSets, targetSeriesConfig);
 
     setCurrentSet(nextSet);
 
@@ -500,12 +619,15 @@ export default function WorkoutSessionScreen() {
     );
   };
 
-  // Update default reset reps when chosen reset set changes
-  const handleResetSetChange = (setNum: number) => {
-    const bounded = Math.max(1, Math.min(parsedSeriesConfig.length, setNum));
-    setResetSet(bounded);
-    const setConfig = parsedSeriesConfig[bounded - 1];
+  // Navigate to adjacent set in reset config (target is the raw +1/-1 of current resetSet)
+  const handleResetSetChange = (targetSetNum: number) => {
+    const currentIdx = parsedSeriesConfig.findIndex(s => s.set === resetSet);
+    const newIdx = targetSetNum > resetSet
+      ? Math.min(parsedSeriesConfig.length - 1, currentIdx + 1)
+      : Math.max(0, currentIdx - 1);
+    const setConfig = parsedSeriesConfig[newIdx];
     if (setConfig) {
+      setResetSet(setConfig.set);
       setResetReps(setConfig.reps);
     }
   };
@@ -606,11 +728,13 @@ export default function WorkoutSessionScreen() {
     const nextCompletedSets = new Set(completedSets);
     nextCompletedSets.add(currentSet);
 
-    const isAllCompleted = nextCompletedSets.size === parsedSeriesConfig.length;
+    const isAllCompleted = parsedSeriesConfig.every(s => nextCompletedSets.has(s.set));
 
+    const currentSetIdx = parsedSeriesConfig.findIndex(s => s.set === currentSet);
+    const nextSetConfig = parsedSeriesConfig[currentSetIdx + 1];
     let nextSet = currentSet;
-    if (currentSet < parsedSeriesConfig.length) {
-      nextSet = currentSet + 1;
+    if (!isAllCompleted && nextSetConfig) {
+      nextSet = nextSetConfig.set;
       setCurrentSet(nextSet);
     }
 
@@ -687,12 +811,13 @@ export default function WorkoutSessionScreen() {
     // Update active set tracking
     setCurrentSet(resetSet);
     
-    // Clear completed sets from the resetSet point onwards
+    // Clear completed sets from the resetSet position onwards (gap-aware)
     const nextCompletedSets = new Set(completedSets);
     const nextSetTimes = { ...setTimes };
-    for (let i = resetSet; i <= parsedSeriesConfig.length; i++) {
-      nextCompletedSets.delete(i);
-      delete nextSetTimes[i];
+    const resetSetIdx = parsedSeriesConfig.findIndex(s => s.set === resetSet);
+    for (let i = resetSetIdx; i < parsedSeriesConfig.length; i++) {
+      nextCompletedSets.delete(parsedSeriesConfig[i].set);
+      delete nextSetTimes[parsedSeriesConfig[i].set];
     }
 
     const updatedAllCompletedSets = {
@@ -760,14 +885,22 @@ export default function WorkoutSessionScreen() {
         const auditDate = date || new Date().toISOString().split('T')[0];
         const routineName = metaGroup?.name || 'Rutina sin nombre';
         const routineId = parseInt(metaGroupId!, 10);
+        const schedId = scheduledRoutineId && parseInt(scheduledRoutineId, 10) > 0 ? parseInt(scheduledRoutineId, 10) : null;
         const ex = activeExercise;
         if (!ex) return;
 
         // Delete any existing audits for this exercise instance in this routine on this date to prevent duplicates
-        await db.runAsync(
-          'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?',
-          [ex.id || null, routineId, auditDate, activeSessionItem.metaGroupItemId]
-        );
+        if (schedId) {
+          await db.runAsync(
+            'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND scheduled_routine_id = ? AND meta_group_item_id = ?',
+            [ex.id || null, schedId, activeSessionItem.metaGroupItemId]
+          );
+        } else {
+          await db.runAsync(
+            'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?',
+            [ex.id || null, routineId, auditDate, activeSessionItem.metaGroupItemId]
+          );
+        }
 
         // Get the series configs to know the reps for each set
         const seriesReps: Record<number, number> = {};
@@ -803,6 +936,7 @@ export default function WorkoutSessionScreen() {
             completed_date: auditDate,
             group_name: activeSessionItem.groupName,
             meta_group_item_id: activeSessionItem.metaGroupItemId,
+            scheduled_routine_id: schedId,
           });
         }
       } catch (e) {
@@ -835,7 +969,13 @@ export default function WorkoutSessionScreen() {
         clearSessionProgress();
         
         // Mark routine as completed in database if date is provided
-        if (date) {
+        const schedId = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
+        if (schedId > 0) {
+          db.runAsync(
+            'UPDATE scheduled_routines SET is_completed = 1 WHERE id = ?',
+            [schedId]
+          ).catch(err => console.error('Error marking scheduled routine as completed:', err));
+        } else if (date) {
           db.runAsync(
             'UPDATE scheduled_routines SET is_completed = 1 WHERE meta_group_id = ? AND scheduled_date = ?',
             [parseInt(metaGroupId!, 10), date]
@@ -855,10 +995,8 @@ export default function WorkoutSessionScreen() {
     const nextSessionItem = sessionExercises[nextIdx];
     const nextCompletedSetsArray = nextSessionItem ? (allCompletedSets[nextSessionItem.uniqueId] || []) : [];
     const nextCompletedSets = new Set(nextCompletedSetsArray);
-    const nextSeriesConfig = nextSessionItem?.exercise.is_constant === 1
-      ? Array.from({ length: nextSessionItem.exercise.default_sets }, (_, i) => ({ set: i + 1, reps: nextSessionItem.exercise.default_reps }))
-      : (nextSessionItem?.exercise.series_config ? JSON.parse(nextSessionItem.exercise.series_config) : []);
-    const nextSet = getNextSetToComplete(nextCompletedSets, nextSeriesConfig.length);
+    const nextSeriesConfig = nextSessionItem ? buildSeriesConfig(nextSessionItem, extraSetsPerExercise, deletedSetsPerExercise) : [];
+    const nextSet = getNextSetToComplete(nextCompletedSets, nextSeriesConfig);
 
     setCurrentSet(nextSet);
 
@@ -901,7 +1039,7 @@ export default function WorkoutSessionScreen() {
     setAllSetTimes(updatedAllSetTimes);
     setCurrentSet(setNum);
 
-    const isAllCompleted = nextCompletedSets.size === parsedSeriesConfig.length;
+    const isAllCompleted = parsedSeriesConfig.every(s => nextCompletedSets.has(s.set));
     let nextIsResting = isResting;
     let nextIsRunning = isRunning;
     let nextRestSeconds = restSeconds;
@@ -934,6 +1072,123 @@ export default function WorkoutSessionScreen() {
       alert('Error', 'No se pudo abrir el video en este dispositivo.');
     });
   };
+
+  // Add an extra set to the current exercise during the session
+  const handleAddExtraSet = () => {
+    if (!activeSessionItem) return;
+    const uniqueId = activeSessionItem.uniqueId;
+    const newExtras = { ...extraSetsPerExercise, [uniqueId]: (extraSetsPerExercise[uniqueId] || 0) + 1 };
+    stateRef.current.extraSetsPerExercise = newExtras;
+    setExtraSetsPerExercise(newExtras);
+    saveProgress(
+      activeIndex, activeSeconds, restSeconds, isResting, currentSet,
+      allCompletedSets, completedExercises, allSetTimes, customReps, customWeights, newExtras
+    );
+  };
+
+  // Delete a set from the current exercise during the session
+  const handleDeleteSet = (setNum: number) => {
+    if (!activeSessionItem) return;
+    const uniqueId = activeSessionItem.uniqueId;
+
+    // Register the set as deleted
+    const currentDeleted = deletedSetsPerExercise[uniqueId] || [];
+    const newDeleted = { ...deletedSetsPerExercise, [uniqueId]: [...currentDeleted, setNum] };
+
+    // Remove from completedSets
+    const newAllCompletedSets = { ...allCompletedSets };
+    if (newAllCompletedSets[uniqueId]) {
+      newAllCompletedSets[uniqueId] = newAllCompletedSets[uniqueId].filter(s => s !== setNum);
+    }
+
+    // Remove from customReps, customWeights, setTimes
+    const newCustomReps = { ...customReps };
+    if (newCustomReps[uniqueId]?.[setNum] !== undefined) {
+      const { [setNum]: _r, ...restReps } = newCustomReps[uniqueId];
+      newCustomReps[uniqueId] = restReps;
+    }
+    const newCustomWeights = { ...customWeights };
+    if (newCustomWeights[uniqueId]?.[setNum] !== undefined) {
+      const { [setNum]: _w, ...restWeights } = newCustomWeights[uniqueId];
+      newCustomWeights[uniqueId] = restWeights;
+    }
+    const newAllSetTimes = { ...allSetTimes };
+    if (newAllSetTimes[uniqueId]?.[setNum] !== undefined) {
+      const { [setNum]: _t, ...restTimes } = newAllSetTimes[uniqueId];
+      newAllSetTimes[uniqueId] = restTimes;
+    }
+
+    // Compute new config after deletion to find a valid currentSet
+    const newConfig = buildSeriesConfig(activeSessionItem, extraSetsPerExercise, newDeleted);
+    let nextCurrentSet = currentSet;
+    if (currentSet === setNum) {
+      nextCurrentSet = getNextSetToComplete(new Set(newAllCompletedSets[uniqueId] || []), newConfig);
+    }
+
+    stateRef.current.deletedSetsPerExercise = newDeleted;
+    setDeletedSetsPerExercise(newDeleted);
+    setAllCompletedSets(newAllCompletedSets);
+    setCustomReps(newCustomReps);
+    setCustomWeights(newCustomWeights);
+    setAllSetTimes(newAllSetTimes);
+    setCurrentSet(nextCurrentSet);
+
+    saveProgress(
+      activeIndex, activeSeconds, restSeconds, isResting, nextCurrentSet,
+      newAllCompletedSets, completedExercises, newAllSetTimes, newCustomReps, newCustomWeights,
+      extraSetsPerExercise, undefined, newDeleted
+    );
+  };
+
+  // Add an ad-hoc exercise to the current session (not part of the routine)
+  const handleAddAdhocExercise = (exercise: Exercise) => {
+    const uniqueId = `adhoc-${Date.now()}-${exercise.id}`;
+    const newItem: SessionExercise = {
+      uniqueId,
+      exercise,
+      groupName: 'Sesión actual',
+      metaGroupItemId: 0,
+      isAdhoc: true,
+    };
+    const newIdx = sessionExercises.length;
+    const updatedExercises = [...sessionExercises, newItem];
+    const newAdhocInfos: AdhocExerciseInfo[] = updatedExercises
+      .filter(e => e.isAdhoc)
+      .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName }));
+
+    stateRef.current.adhocExerciseInfos = newAdhocInfos;
+    setSessionExercises(updatedExercises);
+    setIsAddExerciseOpen(false);
+    setIsExerciseListOpen(false);
+    setExerciseSearch('');
+
+    // Navigate to the new exercise
+    setActiveIndex(newIdx);
+    setIsResting(false);
+    setIsRunning(false);
+    setActiveSeconds(0);
+    setRestSeconds(0);
+    setShowResetOptions(false);
+    setCurrentSet(1);
+
+    saveProgress(
+      newIdx, 0, 0, false, 1,
+      allCompletedSets, completedExercises, allSetTimes, customReps, customWeights,
+      extraSetsPerExercise, newAdhocInfos
+    );
+  };
+
+  // Load all exercises for the add-exercise modal
+  useEffect(() => {
+    if (!isAddExerciseOpen) return;
+    getExercises(db).then(setAllExercises).catch(() => setAllExercises([]));
+  }, [isAddExerciseOpen, db]);
+
+  const filteredExercises = useMemo(() => {
+    if (!exerciseSearch.trim()) return allExercises;
+    const q = exerciseSearch.toLowerCase();
+    return allExercises.filter(e => e.name.toLowerCase().includes(q) || (e.muscle_group ?? '').toLowerCase().includes(q));
+  }, [allExercises, exerciseSearch]);
 
   if (isLoading) {
     return (
@@ -1001,14 +1256,21 @@ export default function WorkoutSessionScreen() {
             tintColor={isDone ? '#34c759' : isActive ? '#3c87f7' : theme.textSecondary}
           />
           <View style={{ flex: 1 }}>
-            <ThemedText
-              type="smallBold"
-              style={[
-                styles.drawerItemName,
-                isDone && { textDecorationLine: 'line-through', opacity: 0.6 },
-              ]}>
-              {item.exercise.name}
-            </ThemedText>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.one }}>
+              <ThemedText
+                type="smallBold"
+                style={[
+                  styles.drawerItemName,
+                  isDone && { textDecorationLine: 'line-through', opacity: 0.6 },
+                ]}>
+                {item.exercise.name}
+              </ThemedText>
+              {item.isAdhoc && (
+                <View style={styles.adhocBadge}>
+                  <ThemedText type="code" style={styles.adhocBadgeText}>+</ThemedText>
+                </View>
+              )}
+            </View>
             <ThemedText type="code" themeColor="textSecondary">
               {item.groupName}
             </ThemedText>
@@ -1074,6 +1336,18 @@ export default function WorkoutSessionScreen() {
               <ScrollView contentContainerStyle={styles.sidebarScroll}>
                 {sessionExercises.map((item, idx) => renderExerciseListItem(item, idx))}
               </ScrollView>
+              <Pressable
+                onPress={() => setIsAddExerciseOpen(true)}
+                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two }, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                  size={16}
+                  tintColor="#3c87f7"
+                />
+                <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
+                  Agregar ejercicio
+                </ThemedText>
+              </Pressable>
             </ThemedView>
           )}
 
@@ -1254,8 +1528,8 @@ export default function WorkoutSessionScreen() {
                   </ThemedText>
                   
                   <View style={styles.seriesGrid}>
-                    {parsedSeriesConfig.map((item, index) => {
-                      const setNum = index + 1;
+                    {parsedSeriesConfig.map((item) => {
+                      const setNum = item.set;
                       const isSetDone = completedSets.has(setNum);
                       const isActiveSet = currentSet === setNum;
                       const isExpanded = expandedSets[setNum] ?? isActiveSet;
@@ -1384,6 +1658,15 @@ export default function WorkoutSessionScreen() {
                                   </ThemedText>
                                 </View>
                               )}
+                              <Pressable
+                                onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
+                                style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
+                                <SymbolView
+                                  name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
+                                  size={14}
+                                  tintColor="#ff453a"
+                                />
+                              </Pressable>
                             </View>
                           </Pressable>
                         );
@@ -1450,6 +1733,15 @@ export default function WorkoutSessionScreen() {
                                   </ThemedText>
                                 </View>
                               )}
+                              <Pressable
+                                onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
+                                style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
+                                <SymbolView
+                                  name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
+                                  size={16}
+                                  tintColor="#ff453a"
+                                />
+                              </Pressable>
                               <SymbolView
                                 name={
                                   isExpanded
@@ -1535,6 +1827,20 @@ export default function WorkoutSessionScreen() {
                       );
                     })}
                   </View>
+
+                  {/* Add extra set button */}
+                  <Pressable
+                    onPress={handleAddExtraSet}
+                    style={({ pressed }) => [styles.addExtraSetBtn, pressed && styles.pressed]}>
+                    <SymbolView
+                      name={{ ios: 'plus.circle', android: 'add_circle_outline', web: 'add_circle_outline' }}
+                      size={16}
+                      tintColor="#3c87f7"
+                    />
+                    <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
+                      Agregar Serie
+                    </ThemedText>
+                  </Pressable>
                 </ThemedView>
 
                 {/* Ergonomic Main Action Toggler (Work / Rest) */}
@@ -1859,6 +2165,87 @@ export default function WorkoutSessionScreen() {
 
               <ScrollView contentContainerStyle={styles.drawerScroll}>
                 {sessionExercises.map((item, idx) => renderExerciseListItem(item, idx))}
+              </ScrollView>
+              <Pressable
+                onPress={() => setIsAddExerciseOpen(true)}
+                style={({ pressed }) => [styles.addExerciseBtn, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                  size={18}
+                  tintColor="#3c87f7"
+                />
+                <ThemedText type="smallBold" style={{ color: '#3c87f7' }}>
+                  Agregar ejercicio a la sesión
+                </ThemedText>
+              </Pressable>
+            </ThemedView>
+          </View>
+        </Modal>
+
+        {/* Add Exercise Modal */}
+        <Modal
+          visible={isAddExerciseOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => { setIsAddExerciseOpen(false); setExerciseSearch(''); }}>
+          <View style={styles.drawerOverlay}>
+            <ThemedView type="backgroundElement" style={styles.drawerContent}>
+              <View style={styles.drawerHeader}>
+                <View>
+                  <ThemedText type="smallBold" style={styles.drawerTitle}>
+                    Agregar ejercicio
+                  </ThemedText>
+                  <ThemedText type="code" themeColor="textSecondary">
+                    Solo para esta sesión
+                  </ThemedText>
+                </View>
+                <Pressable
+                  onPress={() => { setIsAddExerciseOpen(false); setExerciseSearch(''); }}
+                  style={({ pressed }) => [styles.closeDrawerBtn, pressed && styles.pressed]}>
+                  <SymbolView
+                    name={{ ios: 'xmark.circle.fill', android: 'close', web: 'close' }}
+                    size={22}
+                    tintColor={theme.text}
+                  />
+                </Pressable>
+              </View>
+
+              <TextInput
+                value={exerciseSearch}
+                onChangeText={setExerciseSearch}
+                placeholder="Buscar ejercicio..."
+                placeholderTextColor={theme.textSecondary}
+                style={[styles.exerciseSearchInput, { color: theme.text, borderColor: theme.textSecondary }]}
+              />
+
+              <ScrollView contentContainerStyle={styles.drawerScroll}>
+                {filteredExercises.length === 0 ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={{ textAlign: 'center', paddingVertical: 16 }}>
+                    {allExercises.length === 0 ? 'Cargando ejercicios...' : 'No se encontraron ejercicios'}
+                  </ThemedText>
+                ) : (
+                  filteredExercises.map(ex => (
+                    <Pressable
+                      key={ex.id}
+                      onPress={() => handleAddAdhocExercise(ex)}
+                      style={({ pressed }) => [styles.drawerItem, pressed && styles.pressed]}>
+                      <View style={{ flex: 1 }}>
+                        <ThemedText type="smallBold">{ex.name}</ThemedText>
+                        {ex.muscle_group ? (
+                          <ThemedText type="code" themeColor="textSecondary">{ex.muscle_group}</ThemedText>
+                        ) : null}
+                        <ThemedText type="code" themeColor="textSecondary">
+                          {ex.is_constant === 1 ? `${ex.default_sets}×${ex.default_reps} reps` : 'Series variables'}
+                        </ThemedText>
+                      </View>
+                      <SymbolView
+                        name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                        size={20}
+                        tintColor="#3c87f7"
+                      />
+                    </Pressable>
+                  ))
+                )}
               </ScrollView>
             </ThemedView>
           </View>
@@ -2352,5 +2739,46 @@ const styles = StyleSheet.create({
   },
   bottomSpacer: {
     height: 80,
+  },
+  addExtraSetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
+    paddingVertical: Spacing.two,
+    marginTop: Spacing.one,
+  },
+  addExerciseBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one + Spacing.half,
+    paddingVertical: Spacing.two + Spacing.half,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(128,128,128,0.2)',
+  },
+  exerciseSearchInput: {
+    marginHorizontal: Spacing.two,
+    marginBottom: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    borderWidth: 1,
+    fontSize: 14,
+  },
+  deleteSetBtn: {
+    padding: Spacing.one,
+    borderRadius: Spacing.one,
+  },
+  adhocBadge: {
+    backgroundColor: 'rgba(60, 135, 247, 0.15)',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  adhocBadgeText: {
+    fontSize: 10,
+    color: '#3c87f7',
+    fontWeight: 'bold',
   },
 });
