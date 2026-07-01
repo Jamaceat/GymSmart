@@ -28,9 +28,12 @@ import {
   getScheduledRoutinesForRange,
   insertScheduledRoutine,
   deleteScheduledRoutine,
+  updateAuditEntry,
+  getAuditsForSession,
   MetaGroup,
   ScheduledRoutine,
   ExerciseGroup,
+  ExerciseCompletionAudit,
 } from '@/database/database';
 
 // Helper: Get Monday of the week for a given date
@@ -95,6 +98,24 @@ export default function CalendarScreen() {
     name: string;
     isCompleted: boolean;
   } | null>(null);
+
+  // Edit Session Modal State
+  interface EditableSet {
+    auditId: number;
+    setIndex: number;
+    repetitions: number;
+    weight: number | null;
+  }
+  interface EditableExercise {
+    exerciseName: string;
+    groupName: string;
+    sets: EditableSet[];
+  }
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editRoutineName, setEditRoutineName] = useState('');
+  const [editableExercises, setEditableExercises] = useState<EditableExercise[]>([]);
+  const [editingScheduledRoutineId, setEditingScheduledRoutineId] = useState<number | null>(null);
+  const [isSavingEdits, setIsSavingEdits] = useState(false);
 
   // Generate 7 days of the current week (Monday to Sunday)
   const daysOfWeek = Array.from({ length: 7 }, (_, i) => {
@@ -445,6 +466,80 @@ export default function CalendarScreen() {
     }
   };
 
+  const handleOpenEditModal = async (sr: ScheduledRoutine) => {
+    try {
+      const schedId = sr.id > 0 ? sr.id : null;
+      const audits = await getAuditsForSession(db, schedId, sr.meta_group_id, sr.scheduled_date);
+
+      // Group audits by exercise (using exercise_name + meta_group_item_id as key)
+      const grouped: Record<string, { exerciseName: string; groupName: string; sets: EditableSet[] }> = {};
+      for (const a of audits) {
+        const key = `${a.meta_group_item_id ?? 0}-${a.exercise_name}`;
+        if (!grouped[key]) {
+          grouped[key] = {
+            exerciseName: a.exercise_name,
+            groupName: a.group_name ?? 'Sin grupo',
+            sets: [],
+          };
+        }
+        grouped[key].sets.push({
+          auditId: a.id!,
+          setIndex: a.set_index,
+          repetitions: a.repetitions,
+          weight: a.weight ?? null,
+        });
+      }
+
+      const exercises = Object.values(grouped).map(ex => ({
+        ...ex,
+        sets: ex.sets.sort((a, b) => a.setIndex - b.setIndex),
+      }));
+
+      setEditableExercises(exercises);
+      setEditRoutineName(sr.meta_group_name);
+      setEditingScheduledRoutineId(schedId);
+      setIsEditModalOpen(true);
+    } catch (e) {
+      alert('Error', 'No se pudo cargar la sesión para editar.');
+    }
+  };
+
+  const handleSaveEdits = async () => {
+    setIsSavingEdits(true);
+    try {
+      for (const ex of editableExercises) {
+        for (const s of ex.sets) {
+          await updateAuditEntry(db, s.auditId, s.repetitions, s.weight);
+        }
+      }
+      setIsEditModalOpen(false);
+      // Refresh expanded details if that routine is currently expanded
+      if (expandedRoutineId !== null) {
+        const sr = scheduledRoutines.find(r => r.id === expandedRoutineId);
+        if (sr) {
+          await refreshExpandedRoutineDetails(sr.meta_group_id, sr.scheduled_date, sr.id);
+        }
+      }
+    } catch (e) {
+      alert('Error', 'No se pudieron guardar los cambios.');
+    } finally {
+      setIsSavingEdits(false);
+    }
+  };
+
+  const updateEditableSet = (exIdx: number, setIdx: number, field: 'repetitions' | 'weight', value: number) => {
+    setEditableExercises(prev => {
+      const next = prev.map((ex, i) => {
+        if (i !== exIdx) return ex;
+        return {
+          ...ex,
+          sets: ex.sets.map((s, j) => j === setIdx ? { ...s, [field]: value } : s),
+        };
+      });
+      return next;
+    });
+  };
+
   // Toggle routine card expansion to show exercises
   const handleToggleExpandRoutine = async (scheduledId: number, metaGroupId: number, dateStr: string) => {
     if (expandedRoutineId === scheduledId) {
@@ -746,8 +841,8 @@ export default function CalendarScreen() {
                           onPress={() => {
                             router.push({
                               pathname: '/workout/session' as any,
-                              params: { 
-                                metaGroupId: sr.meta_group_id, 
+                              params: {
+                                metaGroupId: sr.meta_group_id,
                                 date: selectedDateStr,
                                 scheduledRoutineId: sr.id
                               }
@@ -884,30 +979,50 @@ export default function CalendarScreen() {
                                 </ThemedView>
                               )}
 
-                              <Pressable
-                                onPress={() => {
-                                  router.push({
-                                    pathname: '/workout/session' as any,
-                                    params: { 
-                                      metaGroupId: sr.meta_group_id, 
-                                      date: selectedDateStr,
-                                      scheduledRoutineId: sr.id
-                                    }
-                                  });
-                                }}
-                                style={({ pressed }) => [
-                                  styles.startRoutineButton,
-                                  pressed && styles.pressed,
-                                ]}>
-                                <SymbolView
-                                  name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
-                                  size={18}
-                                  tintColor="#ffffff"
-                                />
-                                <ThemedText type="smallBold" style={styles.startRoutineButtonText}>
-                                  Comenzar Entrenamiento
-                                </ThemedText>
-                              </Pressable>
+                              <View style={styles.expandedActionsRow}>
+                                {isCompleted && (
+                                  <Pressable
+                                    onPress={() => handleOpenEditModal(sr)}
+                                    style={({ pressed }) => [
+                                      styles.editSessionButton,
+                                      pressed && styles.pressed,
+                                    ]}>
+                                    <SymbolView
+                                      name={{ ios: 'pencil', android: 'edit', web: 'edit' }}
+                                      size={18}
+                                      tintColor="#ff9500"
+                                    />
+                                    <ThemedText type="smallBold" style={{ color: '#ff9500' }}>
+                                      Editar sesión
+                                    </ThemedText>
+                                  </Pressable>
+                                )}
+                                <Pressable
+                                  onPress={() => {
+                                    router.push({
+                                      pathname: '/workout/session' as any,
+                                      params: {
+                                        metaGroupId: sr.meta_group_id,
+                                        date: selectedDateStr,
+                                        scheduledRoutineId: sr.id
+                                      }
+                                    });
+                                  }}
+                                  style={({ pressed }) => [
+                                    styles.startRoutineButton,
+                                    isCompleted && { flex: 1 },
+                                    pressed && styles.pressed,
+                                  ]}>
+                                  <SymbolView
+                                    name={{ ios: 'play.fill', android: 'play_arrow', web: 'play_arrow' }}
+                                    size={18}
+                                    tintColor="#ffffff"
+                                  />
+                                  <ThemedText type="smallBold" style={styles.startRoutineButtonText}>
+                                    {isCompleted ? 'Repetir' : 'Comenzar Entrenamiento'}
+                                  </ThemedText>
+                                </Pressable>
+                              </View>
                             </>
                           ) : (
                             <ThemedText type="small" themeColor="textSecondary" style={styles.noExercises}>
@@ -1047,6 +1162,118 @@ export default function CalendarScreen() {
           </View>
         </Modal>
       </SafeAreaView>
+
+      {/* Edit Session Modal */}
+      <Modal
+        visible={isEditModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setIsEditModalOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <ThemedView type="backgroundElement" style={[styles.modalContent, { maxHeight: '85%' }]}>
+            <View style={styles.modalHeader}>
+              <View>
+                <ThemedText type="smallBold" style={styles.modalTitle}>
+                  Editar sesión
+                </ThemedText>
+                <ThemedText type="code" themeColor="textSecondary">
+                  {editRoutineName}
+                </ThemedText>
+              </View>
+              <Pressable
+                onPress={() => setIsEditModalOpen(false)}
+                style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'close' }}
+                  size={22}
+                  tintColor={theme.text}
+                />
+              </Pressable>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalList} showsVerticalScrollIndicator={false}>
+              {editableExercises.length === 0 ? (
+                <ThemedText type="small" themeColor="textSecondary" style={{ textAlign: 'center', paddingVertical: 24 }}>
+                  No hay datos de auditoría para esta sesión.
+                </ThemedText>
+              ) : (
+                editableExercises.map((ex, exIdx) => (
+                  <ThemedView key={exIdx} type="background" style={styles.editExerciseBlock}>
+                    <ThemedText type="code" themeColor="textSecondary" style={{ marginBottom: Spacing.one }}>
+                      {ex.groupName.toUpperCase()}
+                    </ThemedText>
+                    <ThemedText type="smallBold" style={{ marginBottom: Spacing.two, fontSize: 15 }}>
+                      {ex.exerciseName}
+                    </ThemedText>
+                    {ex.sets.map((s, sIdx) => (
+                      <View key={s.auditId} style={styles.editSetRow}>
+                        <ThemedText type="small" style={styles.editSetLabel}>
+                          Serie {s.setIndex}
+                        </ThemedText>
+                        {/* Reps */}
+                        <View style={styles.editCounter}>
+                          <ThemedText type="code" themeColor="textSecondary" style={{ fontSize: 10, marginBottom: 2 }}>REPS</ThemedText>
+                          <View style={styles.counterRow}>
+                            <Pressable
+                              onPress={() => updateEditableSet(exIdx, sIdx, 'repetitions', Math.max(1, s.repetitions - 1))}
+                              style={[styles.counterBtn, { backgroundColor: theme.backgroundElement }]}>
+                              <ThemedText type="smallBold">-</ThemedText>
+                            </Pressable>
+                            <ThemedText type="smallBold" style={styles.counterValue}>{s.repetitions}</ThemedText>
+                            <Pressable
+                              onPress={() => updateEditableSet(exIdx, sIdx, 'repetitions', Math.min(200, s.repetitions + 1))}
+                              style={[styles.counterBtn, { backgroundColor: theme.backgroundElement }]}>
+                              <ThemedText type="smallBold">+</ThemedText>
+                            </Pressable>
+                          </View>
+                        </View>
+                        {/* Weight */}
+                        {s.weight !== null && (
+                          <View style={styles.editCounter}>
+                            <ThemedText type="code" themeColor="textSecondary" style={{ fontSize: 10, marginBottom: 2 }}>KG</ThemedText>
+                            <View style={styles.counterRow}>
+                              <Pressable
+                                onPress={() => updateEditableSet(exIdx, sIdx, 'weight', Math.max(0, (s.weight ?? 0) - 1))}
+                                style={[styles.counterBtn, { backgroundColor: theme.backgroundElement }]}>
+                                <ThemedText type="smallBold">-</ThemedText>
+                              </Pressable>
+                              <ThemedText type="smallBold" style={styles.counterValue}>{s.weight}</ThemedText>
+                              <Pressable
+                                onPress={() => updateEditableSet(exIdx, sIdx, 'weight', Math.min(1000, (s.weight ?? 0) + 1))}
+                                style={[styles.counterBtn, { backgroundColor: theme.backgroundElement }]}>
+                                <ThemedText type="smallBold">+</ThemedText>
+                              </Pressable>
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    ))}
+                  </ThemedView>
+                ))
+              )}
+            </ScrollView>
+
+            <Pressable
+              onPress={handleSaveEdits}
+              disabled={isSavingEdits}
+              style={({ pressed }) => [
+                styles.saveEditsBtn,
+                isSavingEdits && { opacity: 0.6 },
+                pressed && styles.pressed,
+              ]}>
+              <SymbolView
+                name={{ ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }}
+                size={18}
+                tintColor="#ffffff"
+              />
+              <ThemedText type="smallBold" style={{ color: '#ffffff' }}>
+                {isSavingEdits ? 'Guardando...' : 'Guardar cambios'}
+              </ThemedText>
+            </Pressable>
+          </ThemedView>
+        </View>
+      </Modal>
+
       <ConfirmModal
         visible={confirmModalVisible}
         title="Quitar de la Agenda"
@@ -1372,5 +1599,74 @@ const styles = StyleSheet.create({
   summaryName: {
     fontWeight: '600',
     flex: 1,
+  },
+  expandedActionsRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+    alignItems: 'stretch',
+  },
+  editSessionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two + Spacing.half,
+    borderRadius: Spacing.three,
+    gap: Spacing.two,
+    borderWidth: 1.5,
+    borderColor: '#ff9500',
+    paddingHorizontal: Spacing.three,
+  },
+  editExerciseBlock: {
+    borderRadius: Spacing.two,
+    padding: Spacing.three,
+    marginBottom: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(128,128,128,0.15)',
+  },
+  editSetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: Spacing.one + Spacing.half,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(128,128,128,0.1)',
+    gap: Spacing.two,
+  },
+  editSetLabel: {
+    flex: 1,
+    fontWeight: '600',
+  },
+  editCounter: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  counterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  counterBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  counterValue: {
+    minWidth: 28,
+    textAlign: 'center',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  saveEditsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.three,
+    borderRadius: Spacing.three,
+    gap: Spacing.two,
+    backgroundColor: '#34c759',
+    marginTop: Spacing.two,
   },
 });

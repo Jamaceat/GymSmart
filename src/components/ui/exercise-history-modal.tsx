@@ -634,7 +634,7 @@ export function ExerciseHistoryModal({
                     {selectedData.repsList && selectedData.repsList.length > 0 && (
                       <View style={{ marginTop: Spacing.half, borderTopWidth: 1, borderColor: 'rgba(128,128,128,0.1)', paddingTop: Spacing.half }}>
                         <ThemedText type="code" style={{ color: theme.textSecondary, marginLeft: 6, fontSize: 11 }}>
-                          Repeticiones por serie: {selectedData.repsList.map(r => `${r} reps`).join(', ')}
+                          Reps usadas en el periodo: {selectedData.repsList.map(r => `${r} reps`).join(', ')}
                         </ThemedText>
                       </View>
                     )}

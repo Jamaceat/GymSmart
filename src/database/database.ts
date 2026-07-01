@@ -69,7 +69,7 @@ export interface ExerciseStatItem {
   historical_max_reps: number;
 }
 
-const CURRENT_DB_VERSION = 1;
+const CURRENT_DB_VERSION = 2;
 
 // Database version control and migrations
 export async function migrateDbIfNeeded(db: SQLiteDatabase) {
@@ -319,8 +319,13 @@ export async function migrateDbIfNeeded(db: SQLiteDatabase) {
       await db.execAsync('PRAGMA user_version = 1;');
     }
 
-    // Add future migrations here:
-    // if (currentVersion < 2) { ...; await db.execAsync('PRAGMA user_version = 2;'); }
+    if (currentVersion < 2) {
+      const sessionCols2 = (await db.getAllAsync<{ name: string }>('PRAGMA table_info(session_progress);')).map(c => c.name);
+      if (sessionCols2.length > 0 && !sessionCols2.includes('deleted_sets')) {
+        await db.execAsync('ALTER TABLE session_progress ADD COLUMN deleted_sets TEXT;');
+      }
+      await db.execAsync('PRAGMA user_version = 2;');
+    }
 
   } catch (error) {
     console.error('CRITICAL DATABASE MIGRATION ERROR:', error);
@@ -648,7 +653,9 @@ export async function deleteScheduledRoutine(
         [metaGroupId, date]
       );
       await db.runAsync(
-        'DELETE FROM exercise_completion_audits WHERE routine_id = ? AND completed_date = ?',
+        `DELETE FROM exercise_completion_audits
+         WHERE routine_id = ? AND completed_date = ?
+           AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)`,
         [metaGroupId, date]
       );
       await db.runAsync(
@@ -689,13 +696,43 @@ export async function insertExerciseCompletionAudit(
   return result.lastInsertRowId;
 }
 
+export async function updateAuditEntry(
+  db: SQLiteDatabase,
+  id: number,
+  repetitions: number,
+  weight: number | null
+): Promise<void> {
+  await db.runAsync(
+    'UPDATE exercise_completion_audits SET repetitions = ?, weight = ? WHERE id = ?',
+    [repetitions, weight, id]
+  );
+}
+
+export async function getAuditsForSession(
+  db: SQLiteDatabase,
+  scheduledRoutineId: number | null,
+  routineId: number,
+  completedDate: string
+): Promise<ExerciseCompletionAudit[]> {
+  if (scheduledRoutineId && scheduledRoutineId > 0) {
+    return db.getAllAsync<ExerciseCompletionAudit>(
+      'SELECT * FROM exercise_completion_audits WHERE scheduled_routine_id = ? ORDER BY id ASC',
+      [scheduledRoutineId]
+    );
+  }
+  return db.getAllAsync<ExerciseCompletionAudit>(
+    'SELECT * FROM exercise_completion_audits WHERE routine_id = ? AND completed_date = ? AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0) ORDER BY id ASC',
+    [routineId, completedDate]
+  );
+}
+
 export async function getExerciseStatsAllTime(db: SQLiteDatabase): Promise<ExerciseStatItem[]> {
   return await db.getAllAsync<ExerciseStatItem>(
     `SELECT 
        a.exercise_id,
        a.exercise_name,
        SUM(a.repetitions) as total_reps,
-       COUNT(DISTINCT a.completed_date || '-' || a.routine_id) as times_done,
+       COUNT(DISTINCT a.completed_date || '-' || COALESCE(a.routine_id, 0) || '-' || COALESCE(a.scheduled_routine_id, 0)) as times_done,
        COALESCE(m.historical_max_reps, 0) as historical_max_reps
      FROM exercise_completion_audits a
      LEFT JOIN (
@@ -703,7 +740,7 @@ export async function getExerciseStatsAllTime(db: SQLiteDatabase): Promise<Exerc
        FROM (
          SELECT exercise_id, SUM(repetitions) as routine_reps
          FROM exercise_completion_audits
-         GROUP BY exercise_id, completed_date, routine_id
+         GROUP BY exercise_id, completed_date, routine_id, COALESCE(scheduled_routine_id, 0)
        )
        GROUP BY exercise_id
      ) m ON a.exercise_id = m.exercise_id
@@ -722,7 +759,7 @@ export async function getExerciseStatsForRange(
        a.exercise_id,
        a.exercise_name,
        SUM(a.repetitions) as total_reps,
-       COUNT(DISTINCT a.completed_date || '-' || a.routine_id) as times_done,
+       COUNT(DISTINCT a.completed_date || '-' || COALESCE(a.routine_id, 0) || '-' || COALESCE(a.scheduled_routine_id, 0)) as times_done,
        COALESCE(m.historical_max_reps, 0) as historical_max_reps
      FROM exercise_completion_audits a
      LEFT JOIN (
@@ -730,7 +767,7 @@ export async function getExerciseStatsForRange(
        FROM (
          SELECT exercise_id, SUM(repetitions) as routine_reps
          FROM exercise_completion_audits
-         GROUP BY exercise_id, completed_date, routine_id
+         GROUP BY exercise_id, completed_date, routine_id, COALESCE(scheduled_routine_id, 0)
        )
        GROUP BY exercise_id
      ) m ON a.exercise_id = m.exercise_id
@@ -768,8 +805,8 @@ export async function getExerciseProgressHistory(
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_id = ? OR exercise_name = ?
-       GROUP BY completed_date, routine_id
-       ORDER BY completed_date ASC`,
+       GROUP BY completed_date, routine_id, COALESCE(scheduled_routine_id, 0)
+       ORDER BY completed_date ASC, COALESCE(scheduled_routine_id, 0) ASC`,
       [exerciseId, exerciseName]
     );
   } else {
@@ -784,8 +821,8 @@ export async function getExerciseProgressHistory(
          routine_name
        FROM exercise_completion_audits
        WHERE exercise_name = ?
-       GROUP BY completed_date, routine_id
-       ORDER BY completed_date ASC`,
+       GROUP BY completed_date, routine_id, COALESCE(scheduled_routine_id, 0)
+       ORDER BY completed_date ASC, COALESCE(scheduled_routine_id, 0) ASC`,
       [exerciseName]
     );
   }

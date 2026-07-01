@@ -35,7 +35,11 @@ import {
   MetaGroup,
 } from '@/database/database';
 
-export function MetaGroupsView() {
+interface MetaGroupsViewProps {
+  initialExpandId?: number;
+}
+
+export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
   const db = useSQLiteContext();
   const theme = useTheme();
   const { alert } = useAlert();
@@ -43,7 +47,7 @@ export function MetaGroupsView() {
   // State
   const [metaGroups, setMetaGroups] = useState<MetaGroup[]>([]);
   const [allGroups, setAllGroups] = useState<ExerciseGroup[]>([]);
-  const [expandedMetaGroupId, setExpandedMetaGroupId] = useState<number | null>(null);
+  const [expandedMetaGroupId, setExpandedMetaGroupId] = useState<number | null>(initialExpandId ?? null);
   const [expandedMetaGroupDetails, setExpandedMetaGroupDetails] = useState<MetaGroup | null>(null);
 
   // MetaGroup Management Modals

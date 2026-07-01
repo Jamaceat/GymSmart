@@ -15,8 +15,8 @@ import { MetaGroupsView } from '@/components/workout/MetaGroupsView';
 
 export default function WorkoutModuleScreen() {
   const theme = useTheme();
-  const { tab } = useLocalSearchParams<{ tab?: string }>();
-  
+  const { tab, expandId } = useLocalSearchParams<{ tab?: string; expandId?: string }>();
+
   // Tab index: 0 = Ejercicios, 1 = Grupos, 2 = Rutinas
   const [activeTab, setActiveTab] = useState(0);
 
@@ -31,6 +31,8 @@ export default function WorkoutModuleScreen() {
     }
   }, [tab]);
 
+  const expandIdNum = expandId ? parseInt(expandId, 10) : undefined;
+
   // Render the currently active sub-view
   const renderActiveView = () => {
     switch (activeTab) {
@@ -39,7 +41,7 @@ export default function WorkoutModuleScreen() {
       case 1:
         return <GroupsView />;
       case 2:
-        return <MetaGroupsView />;
+        return <MetaGroupsView initialExpandId={expandIdNum} />;
       default:
         return <ExercisesView />;
     }

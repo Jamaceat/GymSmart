@@ -46,6 +46,7 @@ interface AdhocExerciseInfo {
   uniqueId: string;
   exerciseId: number;
   groupName: string;
+  metaGroupItemId?: number;
 }
 
 function calculateTotalReps(exercise: Exercise): number {
@@ -159,7 +160,7 @@ export default function WorkoutSessionScreen() {
       deletedSetsPerExercise,
       adhocExerciseInfos: sessionExercises
         .filter(e => e.isAdhoc)
-        .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName })),
+        .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName, metaGroupItemId: e.metaGroupItemId })),
     };
   }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, allCompletedSets, completedExercises, allSetTimes, customReps, customWeights, extraSetsPerExercise, deletedSetsPerExercise, sessionExercises]);
 
@@ -445,11 +446,13 @@ export default function WorkoutSessionScreen() {
                   for (const info of adhocInfos) {
                     const exercise = await getExerciseById(db, info.exerciseId);
                     if (exercise) {
+                      // Sessions saved before metaGroupItemId existed encode the timestamp in the uniqueId
+                      const parsedTs = Number(info.uniqueId.split('-')[1]);
                       flattened.push({
                         uniqueId: info.uniqueId,
                         exercise,
                         groupName: info.groupName,
-                        metaGroupItemId: 0,
+                        metaGroupItemId: info.metaGroupItemId ?? (Number.isFinite(parsedTs) && parsedTs > 0 ? -parsedTs : 0),
                         isAdhoc: true,
                       });
                     }
@@ -538,6 +541,71 @@ export default function WorkoutSessionScreen() {
     }
     return base;
   }, []);
+
+  // Rewrite the audit rows for one exercise instance (delete-then-insert keeps it idempotent)
+  const auditExerciseCompletion = useCallback(async (
+    sessionItem: SessionExercise,
+    setsToAudit: number[],
+    auditTimes: Record<number, number>,
+    repsMap: Record<string, Record<number, number>>,
+    weightsMap: Record<string, Record<number, number>>,
+    extrasMap: Record<string, number>,
+    deletedMap: Record<string, number[]>
+  ) => {
+    try {
+      const auditDate = date || new Date().toISOString().split('T')[0];
+      const routineName = metaGroup?.name || 'Rutina sin nombre';
+      const routineId = parseInt(metaGroupId!, 10);
+      const schedId = scheduledRoutineId && parseInt(scheduledRoutineId, 10) > 0 ? parseInt(scheduledRoutineId, 10) : null;
+      const ex = sessionItem.exercise;
+
+      // Delete previous audits for this exercise instance only. The unscheduled branch must
+      // not touch audits that belong to scheduled sessions of the same routine and date.
+      const exerciseClause = ex.id ? 'exercise_id = ?' : 'exercise_name = ?';
+      const exerciseKey = ex.id ?? ex.name;
+      if (schedId) {
+        await db.runAsync(
+          `DELETE FROM exercise_completion_audits WHERE ${exerciseClause} AND scheduled_routine_id = ? AND meta_group_item_id = ?`,
+          [exerciseKey, schedId, sessionItem.metaGroupItemId]
+        );
+      } else {
+        await db.runAsync(
+          `DELETE FROM exercise_completion_audits
+           WHERE ${exerciseClause} AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?
+             AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)`,
+          [exerciseKey, routineId, auditDate, sessionItem.metaGroupItemId]
+        );
+      }
+
+      // Reps per set exactly as the session shows them (includes extra sets, excludes deleted ones)
+      const seriesReps: Record<number, number> = {};
+      for (const item of buildSeriesConfig(sessionItem, extrasMap, deletedMap)) {
+        seriesReps[item.set] = item.reps;
+      }
+
+      for (const setNum of setsToAudit) {
+        const reps = repsMap[sessionItem.uniqueId]?.[setNum] ?? seriesReps[setNum] ?? ex.default_reps ?? 10;
+        const weight = weightsMap[sessionItem.uniqueId]?.[setNum] ?? ex.weight ?? null;
+        const secs = auditTimes[setNum] ?? 0;
+        await insertExerciseCompletionAudit(db, {
+          exercise_id: ex.id || null,
+          exercise_name: ex.name,
+          set_index: setNum,
+          repetitions: reps,
+          weight,
+          seconds_taken: secs,
+          routine_id: routineId,
+          routine_name: routineName,
+          completed_date: auditDate,
+          group_name: sessionItem.groupName,
+          meta_group_item_id: sessionItem.metaGroupItemId,
+          scheduled_routine_id: schedId,
+        });
+      }
+    } catch (e) {
+      console.error('Error saving exercise audit:', e);
+    }
+  }, [db, date, metaGroup, metaGroupId, scheduledRoutineId, buildSeriesConfig]);
 
   // Parse exercise series config (active exercise + extra sets - deleted sets)
   const parsedSeriesConfig = useMemo(() => {
@@ -655,6 +723,19 @@ export default function WorkoutSessionScreen() {
       allSetTimes,
       updatedCustomReps
     );
+
+    // Keep the audit in sync when editing an already-finished exercise
+    if (completedExercises.has(uniqueId)) {
+      auditExerciseCompletion(
+        activeSessionItem,
+        allCompletedSets[uniqueId] || [],
+        allSetTimes[uniqueId] || {},
+        updatedCustomReps,
+        customWeights,
+        extraSetsPerExercise,
+        deletedSetsPerExercise
+      );
+    }
   };
 
   // Update specific set weight during session
@@ -681,6 +762,19 @@ export default function WorkoutSessionScreen() {
       customReps,
       updatedCustomWeights
     );
+
+    // Keep the audit in sync when editing an already-finished exercise
+    if (completedExercises.has(uniqueId)) {
+      auditExerciseCompletion(
+        activeSessionItem,
+        allCompletedSets[uniqueId] || [],
+        allSetTimes[uniqueId] || {},
+        customReps,
+        updatedCustomWeights,
+        extraSetsPerExercise,
+        deletedSetsPerExercise
+      );
+    }
   };
 
   // Cross-timer interval logic
@@ -859,6 +953,19 @@ export default function WorkoutSessionScreen() {
       customWeights
     );
 
+    // Keep the audit in sync when resetting an already-finished exercise
+    if (completedExercises.has(uniqueId)) {
+      auditExerciseCompletion(
+        activeSessionItem,
+        Array.from(nextCompletedSets),
+        nextSetTimes,
+        updatedCustomReps,
+        customWeights,
+        extraSetsPerExercise,
+        deletedSetsPerExercise
+      );
+    }
+
     alert('Reiniciado', `Ejercicio reiniciado en la Serie ${resetSet} con ${resetReps} repeticiones.`);
   };
 
@@ -875,76 +982,16 @@ export default function WorkoutSessionScreen() {
     nextCompletedExercises.add(activeSessionItem.uniqueId);
     setCompletedExercises(nextCompletedExercises);
 
-    // Snapshot completed sets and times for auditing to prevent state race conditions
-    const setsToAudit = Array.from(completedSets);
-    const auditTimes = { ...setTimes };
-
-    // Audit completed sets for active exercise
-    const saveActiveExerciseAudit = async () => {
-      try {
-        const auditDate = date || new Date().toISOString().split('T')[0];
-        const routineName = metaGroup?.name || 'Rutina sin nombre';
-        const routineId = parseInt(metaGroupId!, 10);
-        const schedId = scheduledRoutineId && parseInt(scheduledRoutineId, 10) > 0 ? parseInt(scheduledRoutineId, 10) : null;
-        const ex = activeExercise;
-        if (!ex) return;
-
-        // Delete any existing audits for this exercise instance in this routine on this date to prevent duplicates
-        if (schedId) {
-          await db.runAsync(
-            'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND scheduled_routine_id = ? AND meta_group_item_id = ?',
-            [ex.id || null, schedId, activeSessionItem.metaGroupItemId]
-          );
-        } else {
-          await db.runAsync(
-            'DELETE FROM exercise_completion_audits WHERE exercise_id = ? AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?',
-            [ex.id || null, routineId, auditDate, activeSessionItem.metaGroupItemId]
-          );
-        }
-
-        // Get the series configs to know the reps for each set
-        const seriesReps: Record<number, number> = {};
-        if (ex.is_constant === 1) {
-          for (let i = 1; i <= ex.default_sets; i++) {
-            seriesReps[i] = ex.default_reps;
-          }
-        } else if (ex.series_config) {
-          try {
-            const config = JSON.parse(ex.series_config) as { set: number; reps: number }[];
-            config.forEach(item => {
-              seriesReps[item.set] = item.reps;
-            });
-          } catch (e) {
-            console.error('Failed to parse series config:', e);
-          }
-        }
-
-        // Insert audit for each completed set
-        for (const setNum of setsToAudit) {
-          const reps = customReps[activeSessionItem.uniqueId]?.[setNum] ?? seriesReps[setNum] ?? ex.default_reps ?? 10;
-          const weight = customWeights[activeSessionItem.uniqueId]?.[setNum] ?? ex.weight ?? null;
-          const secs = auditTimes[setNum] ?? 0;
-          await insertExerciseCompletionAudit(db, {
-            exercise_id: ex.id || null,
-            exercise_name: ex.name,
-            set_index: setNum,
-            repetitions: reps,
-            weight: weight,
-            seconds_taken: secs,
-            routine_id: routineId,
-            routine_name: routineName,
-            completed_date: auditDate,
-            group_name: activeSessionItem.groupName,
-            meta_group_item_id: activeSessionItem.metaGroupItemId,
-            scheduled_routine_id: schedId,
-          });
-        }
-      } catch (e) {
-        console.error('Error saving active exercise audit:', e);
-      }
-    };
-
-    saveActiveExerciseAudit();
+    // Snapshot state for auditing to prevent state race conditions
+    const auditPromise = auditExerciseCompletion(
+      activeSessionItem,
+      Array.from(completedSets),
+      { ...setTimes },
+      customReps,
+      customWeights,
+      extraSetsPerExercise,
+      deletedSetsPerExercise
+    );
 
     // Determine next exercise
     const nextUncompletedIndex = sessionExercises.findIndex(
@@ -967,20 +1014,49 @@ export default function WorkoutSessionScreen() {
       } else {
         // All exercises in the routine completed!
         clearSessionProgress();
-        
-        // Mark routine as completed in database if date is provided
+
+        // Mark routine as completed once the last audit is persisted
         const schedId = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
-        if (schedId > 0) {
-          db.runAsync(
-            'UPDATE scheduled_routines SET is_completed = 1 WHERE id = ?',
-            [schedId]
-          ).catch(err => console.error('Error marking scheduled routine as completed:', err));
-        } else if (date) {
-          db.runAsync(
-            'UPDATE scheduled_routines SET is_completed = 1 WHERE meta_group_id = ? AND scheduled_date = ?',
-            [parseInt(metaGroupId!, 10), date]
-          ).catch(err => console.error('Error marking scheduled routine as completed:', err));
-        }
+        const markRoutineCompleted = async () => {
+          if (schedId > 0) {
+            await db.runAsync('UPDATE scheduled_routines SET is_completed = 1 WHERE id = ?', [schedId]);
+            return;
+          }
+          if (!date) return;
+          const mgId = parseInt(metaGroupId!, 10);
+          // Mark a single pending instance, not every instance scheduled for the day
+          const updated = await db.runAsync(
+            `UPDATE scheduled_routines SET is_completed = 1
+             WHERE id = (
+               SELECT id FROM scheduled_routines
+               WHERE meta_group_id = ? AND scheduled_date = ? AND is_completed = 0
+               ORDER BY id LIMIT 1
+             )`,
+            [mgId, date]
+          );
+          if (updated.changes === 0) {
+            const existing = await db.getFirstAsync<{ id: number }>(
+              'SELECT id FROM scheduled_routines WHERE meta_group_id = ? AND scheduled_date = ? LIMIT 1',
+              [mgId, date]
+            );
+            if (!existing) {
+              // Unscheduled session: create its completed row so stats count it, and link its audits
+              const inserted = await db.runAsync(
+                'INSERT INTO scheduled_routines (meta_group_id, scheduled_date, is_completed) VALUES (?, ?, 1)',
+                [mgId, date]
+              );
+              await db.runAsync(
+                `UPDATE exercise_completion_audits SET scheduled_routine_id = ?
+                 WHERE routine_id = ? AND completed_date = ?
+                   AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)`,
+                [inserted.lastInsertRowId, mgId, date]
+              );
+            }
+          }
+        };
+        auditPromise
+          .then(markRoutineCompleted)
+          .catch(err => console.error('Error marking scheduled routine as completed:', err));
 
         alert(
           '¡Entrenamiento Terminado!',
@@ -1063,6 +1139,19 @@ export default function WorkoutSessionScreen() {
       completedExercises,
       updatedAllSetTimes
     );
+
+    // Keep the audit in sync when toggling sets of an already-finished exercise
+    if (completedExercises.has(activeSessionItem.uniqueId)) {
+      auditExerciseCompletion(
+        activeSessionItem,
+        updatedAllCompletedSets[activeSessionItem.uniqueId] || [],
+        updatedAllSetTimes[activeSessionItem.uniqueId] || {},
+        customReps,
+        customWeights,
+        extraSetsPerExercise,
+        deletedSetsPerExercise
+      );
+    }
   };
 
   // Open exercise video helper
@@ -1138,23 +1227,38 @@ export default function WorkoutSessionScreen() {
       newAllCompletedSets, completedExercises, newAllSetTimes, newCustomReps, newCustomWeights,
       extraSetsPerExercise, undefined, newDeleted
     );
+
+    // Keep the audit in sync when deleting sets of an already-finished exercise
+    if (completedExercises.has(uniqueId)) {
+      auditExerciseCompletion(
+        activeSessionItem,
+        newAllCompletedSets[uniqueId] || [],
+        newAllSetTimes[uniqueId] || {},
+        newCustomReps,
+        newCustomWeights,
+        extraSetsPerExercise,
+        newDeleted
+      );
+    }
   };
 
   // Add an ad-hoc exercise to the current session (not part of the routine)
   const handleAddAdhocExercise = (exercise: Exercise) => {
-    const uniqueId = `adhoc-${Date.now()}-${exercise.id}`;
+    const ts = Date.now();
+    const uniqueId = `adhoc-${ts}-${exercise.id}`;
     const newItem: SessionExercise = {
       uniqueId,
       exercise,
       groupName: 'Sesión actual',
-      metaGroupItemId: 0,
+      // Unique negative id so audits of repeated adhoc instances of the same exercise don't collide
+      metaGroupItemId: -ts,
       isAdhoc: true,
     };
     const newIdx = sessionExercises.length;
     const updatedExercises = [...sessionExercises, newItem];
     const newAdhocInfos: AdhocExerciseInfo[] = updatedExercises
       .filter(e => e.isAdhoc)
-      .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName }));
+      .map(e => ({ uniqueId: e.uniqueId, exerciseId: e.exercise.id!, groupName: e.groupName, metaGroupItemId: e.metaGroupItemId }));
 
     stateRef.current.adhocExerciseInfos = newAdhocInfos;
     setSessionExercises(updatedExercises);
@@ -1338,7 +1442,7 @@ export default function WorkoutSessionScreen() {
               </ScrollView>
               <Pressable
                 onPress={() => setIsAddExerciseOpen(true)}
-                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two }, pressed && styles.pressed]}>
+                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginBottom: 0 }, pressed && styles.pressed]}>
                 <SymbolView
                   name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
                   size={16}
@@ -1346,6 +1450,18 @@ export default function WorkoutSessionScreen() {
                 />
                 <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
                   Agregar ejercicio
+                </ThemedText>
+              </Pressable>
+              <Pressable
+                onPress={() => router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`)}
+                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginTop: 0 }, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
+                  size={16}
+                  tintColor="#ff9500"
+                />
+                <ThemedText type="small" style={{ color: '#ff9500', fontWeight: '600' }}>
+                  Editar rutina
                 </ThemedText>
               </Pressable>
             </ThemedView>
@@ -2176,6 +2292,21 @@ export default function WorkoutSessionScreen() {
                 />
                 <ThemedText type="smallBold" style={{ color: '#3c87f7' }}>
                   Agregar ejercicio a la sesión
+                </ThemedText>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setIsExerciseListOpen(false);
+                  router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`);
+                }}
+                style={({ pressed }) => [styles.addExerciseBtn, { borderTopWidth: 0 }, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
+                  size={18}
+                  tintColor="#ff9500"
+                />
+                <ThemedText type="smallBold" style={{ color: '#ff9500' }}>
+                  Editar rutina
                 </ThemedText>
               </Pressable>
             </ThemedView>

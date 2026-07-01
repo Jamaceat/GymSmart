@@ -1019,7 +1019,7 @@ export default function StatisticsScreen() {
                                         </View>
                                         {(() => {
                                           const reps = current.all_reps
-                                            ? Array.from(new Set(current.all_reps.split(',').map(Number)))
+                                            ? current.all_reps.split(',').map(Number)
                                                   .filter(r => !isNaN(r) && r > 0)
                                                   .sort((a, b) => a - b)
                                             : [];
@@ -1048,13 +1048,13 @@ export default function StatisticsScreen() {
                                         </View>
                                         {(() => {
                                           const weights = current.all_weights
-                                            ? Array.from(new Set(current.all_weights.split(',').map(Number)))
+                                            ? current.all_weights.split(',').map(Number)
                                                   .filter(w => !isNaN(w) && w > 0)
                                                   .sort((a, b) => a - b)
                                             : [];
                                           return weights.length > 0 ? (
                                             <ThemedText type="code" style={{ color: theme.textSecondary, marginLeft: 20, fontSize: 11 }}>
-                                              Pesos: {weights.map(w => `${w} kg`).join(', ')}
+                                              Pesos por serie: {weights.map(w => `${w} kg`).join(', ')}
                                             </ThemedText>
                                           ) : null;
                                         })()}
