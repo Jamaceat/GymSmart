@@ -53,6 +53,13 @@ function calculateTotalReps(exercise: Exercise): number {
   return (exercise.default_sets || 0) * (exercise.default_reps || 0);
 }
 
+function getNextSetToComplete(completed: Set<number>, totalSets: number): number {
+  for (let i = 1; i <= totalSets; i++) {
+    if (!completed.has(i)) return i;
+  }
+  return totalSets > 0 ? totalSets : 1;
+}
+
 export default function WorkoutSessionScreen() {
   const db = useSQLiteContext();
   const router = useRouter();
@@ -76,9 +83,9 @@ export default function WorkoutSessionScreen() {
 
   // Session Progress State
   const [completedExercises, setCompletedExercises] = useState<Set<string>>(new Set());
-  const [completedSets, setCompletedSets] = useState<Set<number>>(new Set()); // 1-based set indices completed for active exercise
+  const [allCompletedSets, setAllCompletedSets] = useState<Record<string, number[]>>({});
+  const [allSetTimes, setAllSetTimes] = useState<Record<string, Record<number, number>>>({});
   const [currentSet, setCurrentSet] = useState<number>(1);
-  const [setTimes, setSetTimes] = useState<Record<number, number>>({});
   const [customReps, setCustomReps] = useState<Record<string, Record<number, number>>>({});
   const [customWeights, setCustomWeights] = useState<Record<string, Record<number, number>>>({});
   const [expandedSets, setExpandedSets] = useState<Record<number, boolean>>({});
@@ -95,6 +102,7 @@ export default function WorkoutSessionScreen() {
 
   // Ref trackers for DB load and skip reset side-effects
   const isLoadedFromDb = React.useRef(false);
+  const skipNextActiveIndexReset = React.useRef(false);
   const lastActiveIndex = React.useRef<number | null>(null);
 
   // Ref keeping latest state values to avoid stale closures in unmount cleanup
@@ -104,9 +112,9 @@ export default function WorkoutSessionScreen() {
     restSeconds,
     isResting,
     currentSet,
-    completedSets,
+    allCompletedSets,
     completedExercises,
-    setTimes,
+    allSetTimes,
     customReps,
     customWeights,
   });
@@ -118,17 +126,28 @@ export default function WorkoutSessionScreen() {
       restSeconds,
       isResting,
       currentSet,
-      completedSets,
+      allCompletedSets,
       completedExercises,
-      setTimes,
+      allSetTimes,
       customReps,
       customWeights,
     };
-  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, completedSets, completedExercises, setTimes, customReps, customWeights]);
+  }, [activeIndex, activeSeconds, restSeconds, isResting, currentSet, allCompletedSets, completedExercises, allSetTimes, customReps, customWeights]);
 
   // Flattened active exercise helper
   const activeSessionItem = sessionExercises[activeIndex] || null;
   const activeExercise = activeSessionItem?.exercise || null;
+
+  // Derived Completed Sets and Set Times for the active exercise
+  const completedSets = useMemo(() => {
+    if (!activeSessionItem) return new Set<number>();
+    return new Set(allCompletedSets[activeSessionItem.uniqueId] || []);
+  }, [allCompletedSets, activeSessionItem]);
+
+  const setTimes = useMemo(() => {
+    if (!activeSessionItem) return {};
+    return allSetTimes[activeSessionItem.uniqueId] || {};
+  }, [allSetTimes, activeSessionItem]);
 
   // Format date for title
   const formattedDate = useMemo(() => {
@@ -150,16 +169,16 @@ export default function WorkoutSessionScreen() {
       restSecs: number,
       resting: boolean,
       currSet: number,
-      doneSets: Set<number>,
+      doneSetsMap: Record<string, number[]>,
       doneExs: Set<string>,
-      timesMap?: Record<number, number>,
+      timesMap?: Record<string, Record<number, number>>,
       customRepsMap?: Record<string, Record<number, number>>,
       customWeightsMap?: Record<string, Record<number, number>>
     ) => {
       try {
-        const doneSetsStr = Array.from(doneSets).join(',');
+        const doneSetsStr = JSON.stringify(doneSetsMap);
         const doneExsStr = Array.from(doneExs).join(',');
-        const currentTimes = timesMap || stateRef.current.setTimes || {};
+        const currentTimes = timesMap || stateRef.current.allSetTimes || {};
         const setTimesStr = JSON.stringify(currentTimes);
         const currentCustomReps = customRepsMap || stateRef.current.customReps || {};
         const customRepsStr = JSON.stringify(currentCustomReps);
@@ -252,6 +271,10 @@ export default function WorkoutSessionScreen() {
             );
 
             if (progress) {
+              // Bypass activeIndex change reset during initial DB restoration
+              skipNextActiveIndexReset.current = true;
+              lastActiveIndex.current = progress.active_index;
+
               setActiveIndex(progress.active_index);
               setActiveSeconds(progress.active_seconds);
               setRestSeconds(progress.rest_seconds);
@@ -259,10 +282,30 @@ export default function WorkoutSessionScreen() {
               setCurrentSet(progress.current_set);
               
               if (progress.completed_sets) {
-                const sets = progress.completed_sets.split(',').map(Number).filter(Boolean);
-                setCompletedSets(new Set(sets));
+                try {
+                  const parsed = JSON.parse(progress.completed_sets);
+                  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    setAllCompletedSets(parsed);
+                  } else {
+                    const sets = progress.completed_sets.split(',').map(Number).filter(Boolean);
+                    const activeEx = flattened[progress.active_index];
+                    if (activeEx) {
+                      setAllCompletedSets({ [activeEx.uniqueId]: sets });
+                    } else {
+                      setAllCompletedSets({});
+                    }
+                  }
+                } catch (e) {
+                  const sets = progress.completed_sets.split(',').map(Number).filter(Boolean);
+                  const activeEx = flattened[progress.active_index];
+                  if (activeEx) {
+                    setAllCompletedSets({ [activeEx.uniqueId]: sets });
+                  } else {
+                    setAllCompletedSets({});
+                  }
+                }
               } else {
-                setCompletedSets(new Set());
+                setAllCompletedSets({});
               }
 
               if (progress.completed_exercises) {
@@ -274,12 +317,27 @@ export default function WorkoutSessionScreen() {
 
               if (progress.set_times) {
                 try {
-                  setSetTimes(JSON.parse(progress.set_times));
+                  const parsed = JSON.parse(progress.set_times);
+                  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    const keys = Object.keys(parsed);
+                    if (keys.length > 0 && typeof parsed[keys[0]] === 'object' && parsed[keys[0]] !== null) {
+                      setAllSetTimes(parsed);
+                    } else {
+                      const activeEx = flattened[progress.active_index];
+                      if (activeEx) {
+                        setAllSetTimes({ [activeEx.uniqueId]: parsed });
+                      } else {
+                        setAllSetTimes({});
+                      }
+                    }
+                  } else {
+                    setAllSetTimes({});
+                  }
                 } catch (e) {
-                  setSetTimes({});
+                  setAllSetTimes({});
                 }
               } else {
-                setSetTimes({});
+                setAllSetTimes({});
               }
 
               if (progress.custom_reps) {
@@ -306,6 +364,13 @@ export default function WorkoutSessionScreen() {
               setCompletedExercises(new Set());
               setCustomReps({});
               setCustomWeights({});
+              setAllCompletedSets({});
+              setAllSetTimes({});
+              setCurrentSet(1);
+              setActiveSeconds(0);
+              setRestSeconds(0);
+              setIsResting(false);
+              setIsRunning(false);
             }
           }
         }
@@ -332,9 +397,9 @@ export default function WorkoutSessionScreen() {
           s.restSeconds,
           s.isResting,
           s.currentSet,
-          s.completedSets,
+          s.allCompletedSets,
           s.completedExercises,
-          s.setTimes
+          s.allSetTimes
         );
       }
     };
@@ -372,16 +437,23 @@ export default function WorkoutSessionScreen() {
       return;
     }
 
+    if (skipNextActiveIndexReset.current) {
+      skipNextActiveIndexReset.current = false;
+      lastActiveIndex.current = activeIndex;
+      return;
+    }
+
     if (activeIndex !== lastActiveIndex.current) {
       lastActiveIndex.current = activeIndex;
 
-      if (activeExercise) {
-        setCurrentSet(1);
-        setCompletedSets(new Set());
-        setSetTimes({});
+      if (activeExercise && activeSessionItem) {
+        const itemCompletedSets = new Set(allCompletedSets[activeSessionItem.uniqueId] || []);
+        const nextSet = getNextSetToComplete(itemCompletedSets, parsedSeriesConfig.length);
+
+        setCurrentSet(nextSet);
         setExpandedSets({});
-        setResetSet(1);
-        const initialReps = parsedSeriesConfig[0]?.reps ?? activeExercise.default_reps ?? 10;
+        setResetSet(nextSet);
+        const initialReps = parsedSeriesConfig[nextSet - 1]?.reps ?? activeExercise.default_reps ?? 10;
         setResetReps(initialReps);
         
         // Stop timers when switching exercises
@@ -392,7 +464,7 @@ export default function WorkoutSessionScreen() {
         setShowResetOptions(false);
       }
     }
-  }, [activeIndex, activeExercise, parsedSeriesConfig]);
+  }, [activeIndex, activeExercise, parsedSeriesConfig, allCompletedSets, activeSessionItem]);
 
   // Handle manual/programmatic exercise selection with reset & save
   const handleSelectExercise = (idx: number) => {
@@ -400,24 +472,31 @@ export default function WorkoutSessionScreen() {
     setIsExerciseListOpen(false);
     
     // Reset timers & tracking state locally
-    setCurrentSet(1);
-    setCompletedSets(new Set());
-    setSetTimes({});
     setIsResting(false);
     setIsRunning(false);
     setActiveSeconds(0);
     setRestSeconds(0);
     setShowResetOptions(false);
 
+    const targetSessionItem = sessionExercises[idx];
+    const targetCompletedSetsArray = targetSessionItem ? (allCompletedSets[targetSessionItem.uniqueId] || []) : [];
+    const targetCompletedSets = new Set(targetCompletedSetsArray);
+    const targetSeriesConfig = targetSessionItem?.exercise.is_constant === 1
+      ? Array.from({ length: targetSessionItem.exercise.default_sets }, (_, i) => ({ set: i + 1, reps: targetSessionItem.exercise.default_reps }))
+      : (targetSessionItem?.exercise.series_config ? JSON.parse(targetSessionItem.exercise.series_config) : []);
+    const nextSet = getNextSetToComplete(targetCompletedSets, targetSeriesConfig.length);
+
+    setCurrentSet(nextSet);
+
     saveProgress(
       idx,
       0, // activeSeconds
       0, // restSeconds
       false, // isResting
-      1, // currentSet
-      new Set(), // completedSets
+      nextSet, // currentSet
+      allCompletedSets,
       completedExercises,
-      {}
+      allSetTimes
     );
   };
 
@@ -449,9 +528,9 @@ export default function WorkoutSessionScreen() {
       restSeconds,
       isResting,
       currentSet,
-      completedSets,
+      allCompletedSets,
       completedExercises,
-      setTimes,
+      allSetTimes,
       updatedCustomReps
     );
   };
@@ -474,9 +553,9 @@ export default function WorkoutSessionScreen() {
       restSeconds,
       isResting,
       currentSet,
-      completedSets,
+      allCompletedSets,
       completedExercises,
-      setTimes,
+      allSetTimes,
       customReps,
       updatedCustomWeights
     );
@@ -516,8 +595,9 @@ export default function WorkoutSessionScreen() {
       restSeconds,
       isResting,
       currentSet,
-      completedSets,
-      completedExercises
+      allCompletedSets,
+      completedExercises,
+      allSetTimes
     );
   };
 
@@ -525,7 +605,6 @@ export default function WorkoutSessionScreen() {
   const handleFinishSet = () => {
     const nextCompletedSets = new Set(completedSets);
     nextCompletedSets.add(currentSet);
-    setCompletedSets(nextCompletedSets);
 
     const isAllCompleted = nextCompletedSets.size === parsedSeriesConfig.length;
 
@@ -546,7 +625,19 @@ export default function WorkoutSessionScreen() {
     }
 
     const nextSetTimes = { ...setTimes, [currentSet]: activeSeconds };
-    setSetTimes(nextSetTimes);
+
+    const updatedAllCompletedSets = {
+      ...allCompletedSets,
+      [activeSessionItem.uniqueId]: Array.from(nextCompletedSets)
+    };
+
+    const updatedAllSetTimes = {
+      ...allSetTimes,
+      [activeSessionItem.uniqueId]: nextSetTimes
+    };
+
+    setAllCompletedSets(updatedAllCompletedSets);
+    setAllSetTimes(updatedAllSetTimes);
 
     saveProgress(
       activeIndex,
@@ -554,9 +645,9 @@ export default function WorkoutSessionScreen() {
       0, // rest seconds reset
       !isAllCompleted, // isResting
       nextSet,
-      nextCompletedSets,
+      updatedAllCompletedSets,
       completedExercises,
-      nextSetTimes
+      updatedAllSetTimes
     );
   };
 
@@ -572,8 +663,9 @@ export default function WorkoutSessionScreen() {
       restSeconds,
       false, // isResting = false
       currentSet,
-      completedSets,
-      completedExercises
+      allCompletedSets,
+      completedExercises,
+      allSetTimes
     );
   };
 
@@ -602,8 +694,19 @@ export default function WorkoutSessionScreen() {
       nextCompletedSets.delete(i);
       delete nextSetTimes[i];
     }
-    setCompletedSets(nextCompletedSets);
-    setSetTimes(nextSetTimes);
+
+    const updatedAllCompletedSets = {
+      ...allCompletedSets,
+      [activeSessionItem.uniqueId]: Array.from(nextCompletedSets)
+    };
+
+    const updatedAllSetTimes = {
+      ...allSetTimes,
+      [activeSessionItem.uniqueId]: nextSetTimes
+    };
+
+    setAllCompletedSets(updatedAllCompletedSets);
+    setAllSetTimes(updatedAllSetTimes);
 
     // Update reps for the reset set to the specified resetReps
     const uniqueId = activeSessionItem.uniqueId;
@@ -624,9 +727,9 @@ export default function WorkoutSessionScreen() {
       0, // restSeconds reset
       false, // isResting reset
       resetSet,
-      nextCompletedSets,
+      updatedAllCompletedSets,
       completedExercises,
-      nextSetTimes,
+      updatedAllSetTimes,
       updatedCustomReps,
       customWeights
     );
@@ -646,6 +749,10 @@ export default function WorkoutSessionScreen() {
     const nextCompletedExercises = new Set(completedExercises);
     nextCompletedExercises.add(activeSessionItem.uniqueId);
     setCompletedExercises(nextCompletedExercises);
+
+    // Snapshot completed sets and times for auditing to prevent state race conditions
+    const setsToAudit = Array.from(completedSets);
+    const auditTimes = { ...setTimes };
 
     // Audit completed sets for active exercise
     const saveActiveExerciseAudit = async () => {
@@ -680,10 +787,10 @@ export default function WorkoutSessionScreen() {
         }
 
         // Insert audit for each completed set
-        for (const setNum of completedSets) {
+        for (const setNum of setsToAudit) {
           const reps = customReps[activeSessionItem.uniqueId]?.[setNum] ?? seriesReps[setNum] ?? ex.default_reps ?? 10;
           const weight = customWeights[activeSessionItem.uniqueId]?.[setNum] ?? ex.weight ?? null;
-          const secs = setTimes[setNum] ?? 0;
+          const secs = auditTimes[setNum] ?? 0;
           await insertExerciseCompletionAudit(db, {
             exercise_id: ex.id || null,
             exercise_name: ex.name,
@@ -744,17 +851,26 @@ export default function WorkoutSessionScreen() {
       }
     }
 
-    // Since we are changing the exercise, we save the progress at the NEXT index
-    // with reset timer and set values for the new active exercise!
+    // Determine next set for the next active exercise
+    const nextSessionItem = sessionExercises[nextIdx];
+    const nextCompletedSetsArray = nextSessionItem ? (allCompletedSets[nextSessionItem.uniqueId] || []) : [];
+    const nextCompletedSets = new Set(nextCompletedSetsArray);
+    const nextSeriesConfig = nextSessionItem?.exercise.is_constant === 1
+      ? Array.from({ length: nextSessionItem.exercise.default_sets }, (_, i) => ({ set: i + 1, reps: nextSessionItem.exercise.default_reps }))
+      : (nextSessionItem?.exercise.series_config ? JSON.parse(nextSessionItem.exercise.series_config) : []);
+    const nextSet = getNextSetToComplete(nextCompletedSets, nextSeriesConfig.length);
+
+    setCurrentSet(nextSet);
+
     saveProgress(
       nextIdx,
       0, // activeSeconds
       0, // restSeconds
       false, // isResting
-      1, // currentSet
-      new Set(), // completedSets
+      nextSet, // currentSet
+      allCompletedSets,
       nextCompletedExercises,
-      {}
+      allSetTimes
     );
   };
 
@@ -770,8 +886,19 @@ export default function WorkoutSessionScreen() {
       nextCompletedSets.add(setNum);
       nextSetTimes[setNum] = activeSeconds || 0;
     }
-    setCompletedSets(nextCompletedSets);
-    setSetTimes(nextSetTimes);
+
+    const updatedAllCompletedSets = {
+      ...allCompletedSets,
+      [activeSessionItem.uniqueId]: Array.from(nextCompletedSets)
+    };
+
+    const updatedAllSetTimes = {
+      ...allSetTimes,
+      [activeSessionItem.uniqueId]: nextSetTimes
+    };
+
+    setAllCompletedSets(updatedAllCompletedSets);
+    setAllSetTimes(updatedAllSetTimes);
     setCurrentSet(setNum);
 
     const isAllCompleted = nextCompletedSets.size === parsedSeriesConfig.length;
@@ -794,9 +921,9 @@ export default function WorkoutSessionScreen() {
       nextRestSeconds,
       nextIsResting,
       setNum,
-      nextCompletedSets,
+      updatedAllCompletedSets,
       completedExercises,
-      nextSetTimes
+      updatedAllSetTimes
     );
   };
 
@@ -1428,7 +1555,7 @@ export default function WorkoutSessionScreen() {
                             tintColor="#ffffff"
                           />
                           <ThemedText type="default" style={styles.mainActionButtonText}>
-                            Ir a Siguiente Serie
+                            Ir a Siguiente Ejercicio
                           </ThemedText>
                         </Pressable>
                       );
