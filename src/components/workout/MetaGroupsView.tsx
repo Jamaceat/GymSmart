@@ -21,6 +21,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { SortableList } from '@/components/ui/sortable-list';
 import { useAlert } from '@/components/ui/alert-provider';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import {
   getMetaGroups,
   getMetaGroupWithGroups,
@@ -58,6 +59,7 @@ export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
 
   // Group Selector Modal
   const [isGroupSelectorOpen, setIsGroupSelectorOpen] = useState(false);
+  const [groupSearchQuery, setGroupSearchQuery] = useState('');
 
   const [isLoading, setIsLoading] = useState(true);
 
@@ -234,8 +236,13 @@ export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
     }
   };
 
-  // All groups are available to be added multiple times
-  const availableGroups = allGroups;
+  // All groups are available to be added multiple times, filtered by search query
+  const debouncedGroupSearchQuery = useDebouncedValue(groupSearchQuery, 1000);
+  const normalizedGroupSearchQuery = debouncedGroupSearchQuery.trim().toLowerCase();
+  const availableGroups =
+    normalizedGroupSearchQuery === ''
+      ? allGroups
+      : allGroups.filter((g) => g.name.toLowerCase().includes(normalizedGroupSearchQuery));
 
   const renderMetaGroupItem = ({ item }: { item: MetaGroup }) => {
     const isExpanded = expandedMetaGroupId === item.id;
@@ -369,7 +376,10 @@ export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
               )}
 
               <Pressable
-                onPress={() => setIsGroupSelectorOpen(true)}
+                onPress={() => {
+                  setGroupSearchQuery('');
+                  setIsGroupSelectorOpen(true);
+                }}
                 style={({ pressed }) => [
                   styles.addGroupButton,
                   { borderColor: theme.text },
@@ -494,6 +504,30 @@ export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
               </Pressable>
             </View>
 
+            <View style={[styles.searchBarContainer, { borderColor: 'rgba(128,128,128,0.3)' }]}>
+              <SymbolView
+                name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                size={18}
+                tintColor={theme.textSecondary}
+              />
+              <TextInput
+                style={[styles.searchInput, { color: theme.text }]}
+                placeholder="Buscar grupo..."
+                placeholderTextColor={theme.textSecondary}
+                value={groupSearchQuery}
+                onChangeText={setGroupSearchQuery}
+              />
+              {groupSearchQuery.length > 0 && (
+                <Pressable onPress={() => setGroupSearchQuery('')}>
+                  <SymbolView
+                    name={{ ios: 'xmark.circle.fill', android: 'close', web: 'close' }}
+                    size={18}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
+              )}
+            </View>
+
             <ScrollView contentContainerStyle={styles.selectorScroll}>
               {availableGroups.length > 0 ? (
                 availableGroups.map((g) => (
@@ -524,6 +558,8 @@ export function MetaGroupsView({ initialExpandId }: MetaGroupsViewProps) {
                   style={styles.noAvailableGroups}>
                   {allGroups.length === 0
                     ? 'No hay grupos de ejercicios creados. Créalos primero.'
+                    : normalizedGroupSearchQuery !== ''
+                    ? 'No se encontraron grupos con ese nombre.'
                     : 'Todos los grupos ya están en esta rutina.'}
                 </ThemedText>
               )}
@@ -719,6 +755,20 @@ const styles = StyleSheet.create({
   },
   closeSelectorButton: {
     padding: Spacing.half,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.two,
+    height: 44,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    height: '100%',
   },
   selectorScroll: {
     gap: Spacing.two,

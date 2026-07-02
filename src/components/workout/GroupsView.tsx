@@ -21,6 +21,7 @@ import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { SortableList } from '@/components/ui/sortable-list';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import {
   getGroups,
   getGroupWithExercises,
@@ -54,6 +55,7 @@ export function GroupsView() {
 
   // Exercise Selector Modal
   const [isExerciseSelectorOpen, setIsExerciseSelectorOpen] = useState(false);
+  const [exerciseSearchQuery, setExerciseSearchQuery] = useState('');
 
   const [isLoading, setIsLoading] = useState(true);
 
@@ -228,9 +230,13 @@ export function GroupsView() {
     }
   };
 
-  // Filter exercises available to add (not in the current group)
+  // Filter exercises available to add (not in the current group, matching search)
+  const debouncedExerciseSearchQuery = useDebouncedValue(exerciseSearchQuery, 1000);
+  const normalizedSearchQuery = debouncedExerciseSearchQuery.trim().toLowerCase();
   const availableExercises = allExercises.filter(
-    (ex) => !expandedGroupDetails?.exercises?.some((curr) => curr.id === ex.id)
+    (ex) =>
+      !expandedGroupDetails?.exercises?.some((curr) => curr.id === ex.id) &&
+      (normalizedSearchQuery === '' || ex.name.toLowerCase().includes(normalizedSearchQuery))
   );
 
   const renderGroupItem = ({ item }: { item: ExerciseGroup }) => {
@@ -344,7 +350,10 @@ export function GroupsView() {
             )}
 
             <Pressable
-              onPress={() => setIsExerciseSelectorOpen(true)}
+              onPress={() => {
+                setExerciseSearchQuery('');
+                setIsExerciseSelectorOpen(true);
+              }}
               style={({ pressed }) => [
                 styles.addExerciseButton,
                 { borderColor: theme.text },
@@ -468,6 +477,30 @@ export function GroupsView() {
               </Pressable>
             </View>
 
+            <View style={[styles.searchBarContainer, { borderColor: 'rgba(128,128,128,0.3)' }]}>
+              <SymbolView
+                name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                size={18}
+                tintColor={theme.textSecondary}
+              />
+              <TextInput
+                style={[styles.searchInput, { color: theme.text }]}
+                placeholder="Buscar ejercicio..."
+                placeholderTextColor={theme.textSecondary}
+                value={exerciseSearchQuery}
+                onChangeText={setExerciseSearchQuery}
+              />
+              {exerciseSearchQuery.length > 0 && (
+                <Pressable onPress={() => setExerciseSearchQuery('')}>
+                  <SymbolView
+                    name={{ ios: 'xmark.circle.fill', android: 'close', web: 'close' }}
+                    size={18}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
+              )}
+            </View>
+
             <ScrollView contentContainerStyle={styles.selectorScroll}>
               {availableExercises.length > 0 ? (
                 availableExercises.map((ex) => (
@@ -503,6 +536,8 @@ export function GroupsView() {
                   style={styles.noAvailableExercises}>
                   {allExercises.length === 0
                     ? 'No hay ejercicios en el catálogo. Créalos primero.'
+                    : normalizedSearchQuery !== ''
+                    ? 'No se encontraron ejercicios con ese nombre.'
                     : 'Todos los ejercicios ya están en este grupo.'}
                 </ThemedText>
               )}
@@ -698,6 +733,20 @@ const styles = StyleSheet.create({
   },
   closeSelectorButton: {
     padding: Spacing.half,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.two,
+    height: 44,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    height: '100%',
   },
   selectorScroll: {
     gap: Spacing.two,

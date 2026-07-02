@@ -29,12 +29,16 @@ import {
   insertScheduledRoutine,
   deleteScheduledRoutine,
   updateAuditEntry,
+  insertExerciseCompletionAudit,
   getAuditsForSession,
+  getExercises,
   MetaGroup,
   ScheduledRoutine,
   ExerciseGroup,
   ExerciseCompletionAudit,
+  Exercise,
 } from '@/database/database';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 // Helper: Get Monday of the week for a given date
 const getMonday = (d: Date): Date => {
@@ -107,6 +111,7 @@ export default function CalendarScreen() {
     weight: number | null;
   }
   interface EditableExercise {
+    exerciseId: number | null;
     exerciseName: string;
     groupName: string;
     sets: EditableSet[];
@@ -116,6 +121,17 @@ export default function CalendarScreen() {
   const [editableExercises, setEditableExercises] = useState<EditableExercise[]>([]);
   const [editingScheduledRoutineId, setEditingScheduledRoutineId] = useState<number | null>(null);
   const [isSavingEdits, setIsSavingEdits] = useState(false);
+  const [editingRoutineContext, setEditingRoutineContext] = useState<{
+    routineId: number;
+    routineName: string;
+    completedDate: string;
+  } | null>(null);
+
+  // Add Exercise (within Edit Session) Modal State
+  const [isAddExerciseToEditOpen, setIsAddExerciseToEditOpen] = useState(false);
+  const [addExerciseCatalog, setAddExerciseCatalog] = useState<Exercise[]>([]);
+  const [addExerciseSearchQuery, setAddExerciseSearchQuery] = useState('');
+  const debouncedAddExerciseSearchQuery = useDebouncedValue(addExerciseSearchQuery, 1000);
 
   // Generate 7 days of the current week (Monday to Sunday)
   const daysOfWeek = Array.from({ length: 7 }, (_, i) => {
@@ -472,11 +488,12 @@ export default function CalendarScreen() {
       const audits = await getAuditsForSession(db, schedId, sr.meta_group_id, sr.scheduled_date);
 
       // Group audits by exercise (using exercise_name + meta_group_item_id as key)
-      const grouped: Record<string, { exerciseName: string; groupName: string; sets: EditableSet[] }> = {};
+      const grouped: Record<string, { exerciseId: number | null; exerciseName: string; groupName: string; sets: EditableSet[] }> = {};
       for (const a of audits) {
         const key = `${a.meta_group_item_id ?? 0}-${a.exercise_name}`;
         if (!grouped[key]) {
           grouped[key] = {
+            exerciseId: a.exercise_id ?? null,
             exerciseName: a.exercise_name,
             groupName: a.group_name ?? 'Sin grupo',
             sets: [],
@@ -498,10 +515,49 @@ export default function CalendarScreen() {
       setEditableExercises(exercises);
       setEditRoutineName(sr.meta_group_name);
       setEditingScheduledRoutineId(schedId);
+      setEditingRoutineContext({
+        routineId: sr.meta_group_id,
+        routineName: sr.meta_group_name,
+        completedDate: sr.scheduled_date,
+      });
       setIsEditModalOpen(true);
     } catch (e) {
       alert('Error', 'No se pudo cargar la sesión para editar.');
     }
+  };
+
+  // Load exercise catalog once, when opening the add-exercise-to-edit picker
+  const handleOpenAddExerciseToEdit = async () => {
+    try {
+      if (addExerciseCatalog.length === 0) {
+        const catalog = await getExercises(db);
+        setAddExerciseCatalog(catalog);
+      }
+      setAddExerciseSearchQuery('');
+      setIsAddExerciseToEditOpen(true);
+    } catch (e) {
+      alert('Error', 'No se pudo cargar el catálogo de ejercicios.');
+    }
+  };
+
+  // Add a new exercise (with its default sets) to the session being edited
+  const handleAddExerciseToEdit = (exercise: Exercise) => {
+    const setCount = Math.max(1, exercise.default_sets || 1);
+    // eslint-disable-next-line react-hooks/purity -- runs only inside a user-triggered handler, not during render
+    const tempBase = -Date.now();
+    const newExercise: EditableExercise = {
+      exerciseId: exercise.id ?? null,
+      exerciseName: exercise.name,
+      groupName: 'Añadido',
+      sets: Array.from({ length: setCount }, (_, i) => ({
+        auditId: tempBase - i,
+        setIndex: i + 1,
+        repetitions: exercise.default_reps || 1,
+        weight: exercise.weight ?? null,
+      })),
+    };
+    setEditableExercises(prev => [...prev, newExercise]);
+    setIsAddExerciseToEditOpen(false);
   };
 
   const handleSaveEdits = async () => {
@@ -509,7 +565,24 @@ export default function CalendarScreen() {
     try {
       for (const ex of editableExercises) {
         for (const s of ex.sets) {
-          await updateAuditEntry(db, s.auditId, s.repetitions, s.weight);
+          if (s.auditId > 0) {
+            await updateAuditEntry(db, s.auditId, s.repetitions, s.weight);
+          } else if (editingRoutineContext) {
+            await insertExerciseCompletionAudit(db, {
+              exercise_id: ex.exerciseId,
+              exercise_name: ex.exerciseName,
+              set_index: s.setIndex,
+              repetitions: s.repetitions,
+              weight: s.weight,
+              seconds_taken: null,
+              routine_id: editingRoutineContext.routineId,
+              routine_name: editingRoutineContext.routineName,
+              completed_date: editingRoutineContext.completedDate,
+              group_name: ex.groupName,
+              meta_group_item_id: null,
+              scheduled_routine_id: editingScheduledRoutineId,
+            });
+          }
         }
       }
       setIsEditModalOpen(false);
@@ -992,7 +1065,11 @@ export default function CalendarScreen() {
                                       size={18}
                                       tintColor="#ff9500"
                                     />
-                                    <ThemedText type="smallBold" style={{ color: '#ff9500' }}>
+                                    <ThemedText
+                                      type="smallBold"
+                                      style={{ color: '#ff9500', flexShrink: 1 }}
+                                      numberOfLines={1}
+                                      adjustsFontSizeToFit>
                                       Editar sesión
                                     </ThemedText>
                                   </Pressable>
@@ -1010,7 +1087,7 @@ export default function CalendarScreen() {
                                   }}
                                   style={({ pressed }) => [
                                     styles.startRoutineButton,
-                                    isCompleted && { flex: 1 },
+                                    { flex: 1 },
                                     pressed && styles.pressed,
                                   ]}>
                                   <SymbolView
@@ -1018,7 +1095,11 @@ export default function CalendarScreen() {
                                     size={18}
                                     tintColor="#ffffff"
                                   />
-                                  <ThemedText type="smallBold" style={styles.startRoutineButtonText}>
+                                  <ThemedText
+                                    type="smallBold"
+                                    style={[styles.startRoutineButtonText, { flexShrink: 1 }]}
+                                    numberOfLines={1}
+                                    adjustsFontSizeToFit>
                                     {isCompleted ? 'Repetir' : 'Comenzar Entrenamiento'}
                                   </ThemedText>
                                 </Pressable>
@@ -1251,6 +1332,17 @@ export default function CalendarScreen() {
                   </ThemedView>
                 ))
               )}
+
+              <Pressable
+                onPress={handleOpenAddExerciseToEdit}
+                style={({ pressed }) => [
+                  styles.addExerciseToEditButton,
+                  { borderColor: theme.text },
+                  pressed && styles.pressed,
+                ]}>
+                <SymbolView name={{ ios: 'plus', android: 'add', web: 'add' }} size={14} tintColor={theme.text} />
+                <ThemedText type="smallBold">Agregar ejercicio</ThemedText>
+              </Pressable>
             </ScrollView>
 
             <Pressable
@@ -1270,6 +1362,98 @@ export default function CalendarScreen() {
                 {isSavingEdits ? 'Guardando...' : 'Guardar cambios'}
               </ThemedText>
             </Pressable>
+          </ThemedView>
+        </View>
+      </Modal>
+
+      {/* Add Exercise (to edited session) Picker Modal */}
+      <Modal
+        visible={isAddExerciseToEditOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setIsAddExerciseToEditOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <ThemedView type="backgroundElement" style={[styles.modalContent, { maxHeight: '80%' }]}>
+            <View style={styles.modalHeader}>
+              <ThemedText type="smallBold" style={styles.modalTitle}>
+                Seleccionar Ejercicio
+              </ThemedText>
+              <Pressable
+                onPress={() => setIsAddExerciseToEditOpen(false)}
+                style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}>
+                <SymbolView
+                  name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'close' }}
+                  size={22}
+                  tintColor={theme.text}
+                />
+              </Pressable>
+            </View>
+
+            <View style={styles.searchBarContainer}>
+              <SymbolView
+                name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                size={18}
+                tintColor={theme.textSecondary}
+              />
+              <TextInput
+                style={[styles.searchInput, { color: theme.text }]}
+                placeholder="Buscar ejercicio..."
+                placeholderTextColor={theme.textSecondary}
+                value={addExerciseSearchQuery}
+                onChangeText={setAddExerciseSearchQuery}
+              />
+              {addExerciseSearchQuery.length > 0 && (
+                <Pressable onPress={() => setAddExerciseSearchQuery('')}>
+                  <SymbolView
+                    name={{ ios: 'xmark.circle.fill', android: 'close', web: 'close' }}
+                    size={18}
+                    tintColor={theme.textSecondary}
+                  />
+                </Pressable>
+              )}
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalList}>
+              {(() => {
+                const query = debouncedAddExerciseSearchQuery.trim().toLowerCase();
+                const filtered = addExerciseCatalog.filter(
+                  (ex) => query === '' || ex.name.toLowerCase().includes(query)
+                );
+                if (filtered.length === 0) {
+                  return (
+                    <ThemedText type="small" themeColor="textSecondary" style={{ textAlign: 'center', paddingVertical: 24 }}>
+                      {addExerciseCatalog.length === 0
+                        ? 'No hay ejercicios en el catálogo.'
+                        : 'No se encontraron ejercicios con ese nombre.'}
+                    </ThemedText>
+                  );
+                }
+                return filtered.map((ex) => (
+                  <Pressable
+                    key={ex.id}
+                    onPress={() => handleAddExerciseToEdit(ex)}
+                    style={({ pressed }) => [
+                      styles.modalItem,
+                      { backgroundColor: theme.background },
+                      pressed && styles.pressed,
+                    ]}>
+                    <View>
+                      <ThemedText type="smallBold">{ex.name}</ThemedText>
+                      <ThemedText type="small" themeColor="textSecondary">
+                        {ex.is_constant === 1
+                          ? `${ex.default_sets} x ${ex.default_reps}`
+                          : `${ex.default_sets} series var.`}
+                      </ThemedText>
+                    </View>
+                    <SymbolView
+                      name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                      size={22}
+                      tintColor="#3c87f7"
+                    />
+                  </Pressable>
+                ));
+              })()}
+            </ScrollView>
           </ThemedView>
         </View>
       </Modal>
@@ -1616,6 +1800,8 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#ff9500',
     paddingHorizontal: Spacing.three,
+    flexShrink: 1,
+    minWidth: 0,
   },
   editExerciseBlock: {
     borderRadius: Spacing.two,
@@ -1636,6 +1822,17 @@ const styles = StyleSheet.create({
   editSetLabel: {
     flex: 1,
     fontWeight: '600',
+  },
+  addExerciseToEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    gap: Spacing.one,
+    marginTop: Spacing.one,
   },
   editCounter: {
     alignItems: 'center',
