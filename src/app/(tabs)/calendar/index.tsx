@@ -86,7 +86,7 @@ export default function CalendarScreen() {
   const [scheduledRoutines, setScheduledRoutines] = useState<ScheduledRoutine[]>([]);
   const [allRoutines, setAllRoutines] = useState<MetaGroup[]>([]);
   const [expandedRoutineId, setExpandedRoutineId] = useState<number | null>(null);
-  const [expandedRoutineDetails, setExpandedRoutineDetails] = useState<(MetaGroup & { summary?: { name: string; totalReps: number; setsCount: number }[] }) | null>(null);
+  const [expandedRoutineDetails, setExpandedRoutineDetails] = useState<(MetaGroup & { summary?: { name: string; totalReps: number; setsCount: number }[]; templateUpdated?: boolean }) | null>(null);
   
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -184,7 +184,7 @@ export default function CalendarScreen() {
       if (expandedRoutineId !== null) {
         const currentExpanded = mergedRoutines.find(r => r.id === expandedRoutineId);
         if (currentExpanded) {
-          await refreshExpandedRoutineDetails(currentExpanded.meta_group_id, currentExpanded.scheduled_date, currentExpanded.id);
+          await refreshExpandedRoutineDetails(currentExpanded.meta_group_id, currentExpanded.scheduled_date, currentExpanded.id, currentExpanded.is_completed === 1);
         } else {
           setExpandedRoutineId(null);
           setExpandedRoutineDetails(null);
@@ -204,7 +204,7 @@ export default function CalendarScreen() {
   );
 
   // Helper to load complete routine metadata with exercise details
-  const refreshExpandedRoutineDetails = async (metaGroupId: number, dateStr: string, scheduledRoutineId?: number) => {
+  const refreshExpandedRoutineDetails = async (metaGroupId: number, dateStr: string, scheduledRoutineId?: number, isCompleted?: boolean) => {
     try {
       // 1. Fetch audits for this routine on this date
       const audits = await db.getAllAsync<{
@@ -309,6 +309,9 @@ export default function CalendarScreen() {
 
         // Track which audited exercises we've displayed using audit ID
         const displayedAuditIds = new Set<number>();
+        // Count of template exercises that have no matching audit in a completed session —
+        // these must not render as "pending"; they signal the routine changed since completion.
+        let missingFromAuditsCount = 0;
 
         const mergedGroups = liveGroups.map((group) => {
           const exercises = (group.exercises ?? []).filter(Boolean).map((ex) => {
@@ -330,8 +333,8 @@ export default function CalendarScreen() {
               const repsList = exAudits.map(a => a.repetitions);
               const allRepsSame = repsList.every(r => r === repsList[0]);
               const totalSets = exAudits.length;
-              const repsDisplay = allRepsSame 
-                ? `${totalSets} x ${repsList[0]} reps` 
+              const repsDisplay = allRepsSame
+                ? `${totalSets} x ${repsList[0]} reps`
                 : `${repsList.reduce((sum, r) => sum + r, 0)} reps`;
 
               return {
@@ -341,14 +344,21 @@ export default function CalendarScreen() {
               };
             }
 
+            if (isCompleted && audits.length > 0) {
+              // The routine template gained this exercise after the session was completed —
+              // don't show it as pending, it was never part of what was actually done.
+              missingFromAuditsCount += 1;
+              return null;
+            }
+
             return ex; // return live exercise state as planned
-          });
+          }).filter((ex): ex is NonNullable<typeof ex> => ex !== null);
 
           return {
             ...group,
             exercises
           };
-        });
+        }).filter(group => !(isCompleted && audits.length > 0) || (group.exercises && group.exercises.length > 0));
 
         // Include any exercises that were completed historically but have since been removed from the template
         const extraAudits = audits.filter(audit => {
@@ -412,7 +422,8 @@ export default function CalendarScreen() {
           name: routineData?.name || '',
           created_at: routineData?.created_at,
           groups: mergedGroups,
-          summary: summaryList
+          summary: summaryList,
+          templateUpdated: missingFromAuditsCount > 0
         });
       } else {
         // No live template (deleted). Reconstruct purely from audits
@@ -590,7 +601,7 @@ export default function CalendarScreen() {
       if (expandedRoutineId !== null) {
         const sr = scheduledRoutines.find(r => r.id === expandedRoutineId);
         if (sr) {
-          await refreshExpandedRoutineDetails(sr.meta_group_id, sr.scheduled_date, sr.id);
+          await refreshExpandedRoutineDetails(sr.meta_group_id, sr.scheduled_date, sr.id, sr.is_completed === 1);
         }
       }
     } catch (e) {
@@ -614,13 +625,13 @@ export default function CalendarScreen() {
   };
 
   // Toggle routine card expansion to show exercises
-  const handleToggleExpandRoutine = async (scheduledId: number, metaGroupId: number, dateStr: string) => {
+  const handleToggleExpandRoutine = async (scheduledId: number, metaGroupId: number, dateStr: string, isCompleted?: boolean) => {
     if (expandedRoutineId === scheduledId) {
       setExpandedRoutineId(null);
       setExpandedRoutineDetails(null);
     } else {
       setExpandedRoutineId(scheduledId);
-      await refreshExpandedRoutineDetails(metaGroupId, dateStr, scheduledId);
+      await refreshExpandedRoutineDetails(metaGroupId, dateStr, scheduledId, isCompleted);
     }
   };
 
@@ -876,7 +887,7 @@ export default function CalendarScreen() {
                     ]}>
                     {/* Routine Card Header */}
                     <Pressable
-                      onPress={() => handleToggleExpandRoutine(sr.id, sr.meta_group_id, sr.scheduled_date)}
+                      onPress={() => handleToggleExpandRoutine(sr.id, sr.meta_group_id, sr.scheduled_date, isCompleted)}
                       style={styles.routineHeader}>
                       <View style={styles.routineHeaderLeft}>
                         <SymbolView
@@ -971,6 +982,47 @@ export default function CalendarScreen() {
 
                       return (
                         <View style={styles.routineDetailsContainer}>
+                          {isCompleted && expandedRoutineDetails.templateUpdated && (
+                            <ThemedView
+                              type="background"
+                              style={[styles.templateUpdatedBanner, { borderColor: '#ff9500' }]}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.one, marginBottom: Spacing.one }}>
+                                <SymbolView
+                                  name={{ ios: 'exclamationmark.triangle.fill', android: 'warning', web: 'warning' }}
+                                  size={16}
+                                  tintColor="#ff9500"
+                                />
+                                <ThemedText type="smallBold" style={{ color: '#ff9500', flex: 1 }}>
+                                  La rutina fue actualizada desde esta sesión
+                                </ThemedText>
+                              </View>
+                              <Pressable
+                                onPress={() => {
+                                  router.push({
+                                    pathname: '/workout/session' as any,
+                                    params: {
+                                      metaGroupId: sr.meta_group_id,
+                                      date: sr.scheduled_date,
+                                      ...(sr.id > 0 ? { scheduledRoutineId: sr.id } : {}),
+                                      mode: 'continue',
+                                    },
+                                  });
+                                }}
+                                style={({ pressed }) => [
+                                  styles.continueNewButton,
+                                  pressed && styles.pressed,
+                                ]}>
+                                <SymbolView
+                                  name={{ ios: 'arrow.right.circle.fill', android: 'arrow_forward', web: 'arrow_forward' }}
+                                  size={16}
+                                  tintColor="#ffffff"
+                                />
+                                <ThemedText type="smallBold" style={{ color: '#ffffff' }}>
+                                  Continuar con lo nuevo
+                                </ThemedText>
+                              </Pressable>
+                            </ThemedView>
+                          )}
                           {groupsWithOccurrence.length > 0 ? (
                             <>
                               {groupsWithOccurrence.map((group, idx) => (
@@ -1053,6 +1105,37 @@ export default function CalendarScreen() {
                               )}
 
                               <View style={styles.expandedActionsRow}>
+                                {isCompleted && (
+                                  <Pressable
+                                    onPress={() => {
+                                      router.push({
+                                        pathname: '/workout/session' as any,
+                                        params: {
+                                          metaGroupId: sr.meta_group_id,
+                                          date: sr.scheduled_date,
+                                          ...(sr.id > 0 ? { scheduledRoutineId: sr.id } : {}),
+                                          mode: 'review',
+                                        },
+                                      });
+                                    }}
+                                    style={({ pressed }) => [
+                                      styles.reviewSessionButton,
+                                      pressed && styles.pressed,
+                                    ]}>
+                                    <SymbolView
+                                      name={{ ios: 'eye', android: 'visibility', web: 'visibility' }}
+                                      size={18}
+                                      tintColor="#3c87f7"
+                                    />
+                                    <ThemedText
+                                      type="smallBold"
+                                      style={{ color: '#3c87f7', flexShrink: 1 }}
+                                      numberOfLines={1}
+                                      adjustsFontSizeToFit>
+                                      Revisar rutina
+                                    </ThemedText>
+                                  </Pressable>
+                                )}
                                 {isCompleted && (
                                   <Pressable
                                     onPress={() => handleOpenEditModal(sr)}
@@ -1786,6 +1869,7 @@ const styles = StyleSheet.create({
   },
   expandedActionsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.two,
     marginTop: Spacing.two,
     alignItems: 'stretch',
@@ -1802,6 +1886,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     flexShrink: 1,
     minWidth: 0,
+  },
+  reviewSessionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two + Spacing.half,
+    borderRadius: Spacing.three,
+    gap: Spacing.two,
+    borderWidth: 1.5,
+    borderColor: '#3c87f7',
+    paddingHorizontal: Spacing.three,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  templateUpdatedBanner: {
+    borderRadius: Spacing.two,
+    borderWidth: 1.5,
+    padding: Spacing.two,
+    marginBottom: Spacing.two,
+  },
+  continueNewButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
+    gap: Spacing.one,
+    backgroundColor: '#ff9500',
   },
   editExerciseBlock: {
     borderRadius: Spacing.two,

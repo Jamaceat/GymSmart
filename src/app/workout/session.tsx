@@ -11,10 +11,11 @@ import {
   ActivityIndicator,
   Linking,
   TextInput,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useSQLiteContext } from 'expo-sqlite';
+import { useSQLiteContext, SQLiteDatabase } from 'expo-sqlite';
 import { SymbolView } from 'expo-symbols';
 
 import { ThemedText } from '@/components/themed-text';
@@ -27,9 +28,11 @@ import {
   getGroupWithExercises,
   getExercises,
   getExerciseById,
+  getAuditsForSession,
   MetaGroup,
   ExerciseGroup,
   Exercise,
+  ExerciseCompletionAudit,
   insertExerciseCompletionAudit,
 } from '@/database/database';
 import { useAlert } from '@/components/ui/alert-provider';
@@ -71,6 +74,148 @@ function getNextSetToComplete(completed: Set<number>, seriesConfig: { set: numbe
   return seriesConfig.length > 0 ? seriesConfig[seriesConfig.length - 1].set : 1;
 }
 
+// Instance key matching the same scheme used across audits: `${meta_group_item_id}-${exercise_id}`
+function auditInstanceKey(audit: ExerciseCompletionAudit): string {
+  const metaId = audit.meta_group_item_id ?? 0;
+  return `${metaId}-${audit.exercise_id ?? audit.exercise_name}`;
+}
+
+interface AuditSeed {
+  completedIds: Set<string>;
+  completedSetsMap: Record<string, number[]>;
+  setTimesMap: Record<string, Record<number, number>>;
+  customRepsMap: Record<string, Record<number, number>>;
+  customWeightsMap: Record<string, Record<number, number>>;
+  extraSetsMap: Record<string, number>;
+  deletedSetsMap: Record<string, number[]>;
+  reconstructedItems: SessionExercise[];
+}
+
+// Reconstructs session state purely from recorded audit rows — the source of truth for a
+// completed session. Used by both review mode (audits only) and continue mode (audits seeded
+// on top of the live template).
+async function buildAuditSeed(
+  db: SQLiteDatabase,
+  audits: ExerciseCompletionAudit[],
+  templateItems: SessionExercise[]
+): Promise<AuditSeed> {
+  const seed: AuditSeed = {
+    completedIds: new Set(),
+    completedSetsMap: {},
+    setTimesMap: {},
+    customRepsMap: {},
+    customWeightsMap: {},
+    extraSetsMap: {},
+    deletedSetsMap: {},
+    reconstructedItems: [],
+  };
+
+  const byInstance: Record<string, ExerciseCompletionAudit[]> = {};
+  for (const audit of audits) {
+    const key = auditInstanceKey(audit);
+    if (!byInstance[key]) byInstance[key] = [];
+    byInstance[key].push(audit);
+  }
+
+  const templateByKey: Record<string, SessionExercise> = {};
+  for (const item of templateItems) {
+    templateByKey[item.uniqueId] = item;
+  }
+
+  for (const [instanceKey, group] of Object.entries(byInstance)) {
+    const sorted = [...group].sort((a, b) => a.set_index - b.set_index);
+    const templateItem = templateByKey[instanceKey];
+
+    let sessionItem: SessionExercise;
+    if (templateItem) {
+      sessionItem = templateItem;
+    } else {
+      const first = sorted[0];
+      let exercise: Exercise | null = first.exercise_id ? await getExerciseById(db, first.exercise_id) : null;
+      if (exercise) {
+        // Clone so we don't mutate the catalog object shared elsewhere
+        exercise = { ...exercise };
+      } else {
+        exercise = {
+          id: first.exercise_id ?? undefined,
+          name: first.exercise_name,
+          default_sets: sorted.length,
+          default_reps: first.repetitions,
+          is_constant: 1,
+          series_config: null,
+          video_url: null,
+          initial_state: null,
+          weight: first.weight ?? null,
+        } as Exercise;
+      }
+      sessionItem = {
+        uniqueId: instanceKey,
+        exercise,
+        groupName: first.group_name || 'Sesión anterior',
+        metaGroupItemId: first.meta_group_item_id ?? 0,
+        isAdhoc: true,
+      };
+      seed.reconstructedItems.push(sessionItem);
+    }
+
+    const uniqueId = sessionItem.uniqueId;
+    seed.completedIds.add(uniqueId);
+    seed.completedSetsMap[uniqueId] = sorted.map(a => a.set_index);
+    seed.setTimesMap[uniqueId] = {};
+    seed.customRepsMap[uniqueId] = {};
+    seed.customWeightsMap[uniqueId] = {};
+
+    let firstWeight: number | null = null;
+    for (const audit of sorted) {
+      seed.customRepsMap[uniqueId][audit.set_index] = audit.repetitions;
+      if (audit.weight != null) {
+        seed.customWeightsMap[uniqueId][audit.set_index] = audit.weight;
+        if (firstWeight === null) firstWeight = audit.weight;
+      }
+      if (audit.seconds_taken != null && audit.seconds_taken > 0) {
+        seed.setTimesMap[uniqueId][audit.set_index] = audit.seconds_taken;
+      }
+    }
+
+    // If the exercise has no configured weight but audits recorded one, surface it so the
+    // kg counter renders (buildSeriesConfig/UI key off exercise.weight).
+    if (firstWeight !== null && (sessionItem.exercise.weight === null || sessionItem.exercise.weight === undefined)) {
+      sessionItem = { ...sessionItem, exercise: { ...sessionItem.exercise, weight: firstWeight } };
+      if (templateItem) {
+        // Replace the reference used going forward for this instance
+        templateByKey[instanceKey] = sessionItem;
+      } else {
+        seed.reconstructedItems[seed.reconstructedItems.length - 1] = sessionItem;
+      }
+    }
+
+    // Reconcile shape so buildSeriesConfig renders exactly the audited sets: base config
+    // (constant sets or series_config) plus extras for anything beyond it, minus base sets
+    // that have no audit (deleted/skipped).
+    const ex = sessionItem.exercise;
+    let base: { set: number; reps: number }[] = [];
+    if (ex.is_constant === 1) {
+      base = Array.from({ length: ex.default_sets || 0 }, (_, i) => ({ set: i + 1, reps: ex.default_reps }));
+    } else if (ex.series_config) {
+      try {
+        base = JSON.parse(ex.series_config) as { set: number; reps: number }[];
+      } catch {
+        base = [];
+      }
+    }
+    const auditedSetNums = new Set(sorted.map(a => a.set_index));
+    const maxAuditSet = sorted.length > 0 ? sorted[sorted.length - 1].set_index : 0;
+    const maxBaseSet = base.length > 0 ? Math.max(...base.map(s => s.set)) : 0;
+    const extras = Math.max(0, maxAuditSet - maxBaseSet);
+    if (extras > 0) seed.extraSetsMap[uniqueId] = extras;
+
+    const deleted = base.filter(s => !auditedSetNums.has(s.set)).map(s => s.set);
+    if (deleted.length > 0) seed.deletedSetsMap[uniqueId] = deleted;
+  }
+
+  return seed;
+}
+
 export default function WorkoutSessionScreen() {
   const db = useSQLiteContext();
   const router = useRouter();
@@ -80,11 +225,14 @@ export default function WorkoutSessionScreen() {
   const isTablet = width > 768;
 
   // Search parameters
-  const { metaGroupId, date, scheduledRoutineId } = useLocalSearchParams<{
+  const { metaGroupId, date, scheduledRoutineId, mode } = useLocalSearchParams<{
     metaGroupId: string;
     date: string;
     scheduledRoutineId?: string;
+    mode?: string;
   }>();
+  const isReviewMode = mode === 'review';
+  const isContinueMode = mode === 'continue';
 
   // Routine and layout state
   const [metaGroup, setMetaGroup] = useState<MetaGroup | null>(null);
@@ -126,6 +274,7 @@ export default function WorkoutSessionScreen() {
   const isLoadedFromDb = React.useRef(false);
   const skipNextActiveIndexReset = React.useRef(false);
   const lastActiveIndex = React.useRef<number | null>(null);
+  const timerAnchorRef = React.useRef<{ timestamp: number; baseActive: number; baseRest: number } | null>(null);
 
   // Ref keeping latest state values to avoid stale closures in unmount cleanup
   const stateRef = React.useRef({
@@ -208,6 +357,7 @@ export default function WorkoutSessionScreen() {
       adhocInfosOverride?: AdhocExerciseInfo[],
       deletedSetsOverride?: Record<string, number[]>
     ) => {
+      if (isReviewMode) return;
       try {
         const doneSetsStr = JSON.stringify(doneSetsMap);
         const doneExsStr = Array.from(doneExs).join(',');
@@ -251,7 +401,7 @@ export default function WorkoutSessionScreen() {
         console.error('Error saving session progress:', e);
       }
     },
-    [db, metaGroupId, date, scheduledRoutineId]
+    [db, metaGroupId, date, scheduledRoutineId, isReviewMode]
   );
 
   // Clear progress callback
@@ -302,6 +452,49 @@ export default function WorkoutSessionScreen() {
                   });
                 }
               }
+            }
+
+            // Review/Continue modes: seed state from exercise_completion_audits — the source of
+            // truth for a completed session — instead of restoring session_progress.
+            if (isReviewMode || isContinueMode) {
+              const schedIdForAudits = scheduledRoutineId ? parseInt(scheduledRoutineId, 10) : 0;
+              const audits = await getAuditsForSession(
+                db,
+                schedIdForAudits > 0 ? schedIdForAudits : null,
+                mGroupId,
+                date
+              );
+              const seed = await buildAuditSeed(db, audits, flattened);
+
+              if (isReviewMode) {
+                // Review is built purely from audited instances — never show unaudited
+                // template exercises as if they were part of what was actually done.
+                const reviewList = flattened
+                  .filter(item => seed.completedIds.has(item.uniqueId))
+                  .concat(seed.reconstructedItems);
+                setSessionExercises(reviewList);
+                setActiveIndex(0);
+              } else {
+                const continueList = [...flattened, ...seed.reconstructedItems];
+                setSessionExercises(continueList);
+                const firstPending = continueList.findIndex(item => !seed.completedIds.has(item.uniqueId));
+                setActiveIndex(firstPending !== -1 ? firstPending : 0);
+              }
+
+              setCompletedExercises(seed.completedIds);
+              setAllCompletedSets(seed.completedSetsMap);
+              setAllSetTimes(seed.setTimesMap);
+              setCustomReps(seed.customRepsMap);
+              setCustomWeights(seed.customWeightsMap);
+              setExtraSetsPerExercise(seed.extraSetsMap);
+              setDeletedSetsPerExercise(seed.deletedSetsMap);
+              setCurrentSet(1);
+              setActiveSeconds(0);
+              setRestSeconds(0);
+              setIsResting(false);
+              setIsRunning(false);
+
+              return;
             }
 
             // Fetch progress from database (before setSessionExercises so we can include adhoc)
@@ -490,7 +683,7 @@ export default function WorkoutSessionScreen() {
     };
 
     loadRoutine();
-  }, [db, metaGroupId, date, scheduledRoutineId, alert]);
+  }, [db, metaGroupId, date, scheduledRoutineId, alert, isReviewMode, isContinueMode]);
 
   // Unmount effect to save active timers & progress when leaving
   useEffect(() => {
@@ -565,13 +758,13 @@ export default function WorkoutSessionScreen() {
       const exerciseKey = ex.id ?? ex.name;
       if (schedId) {
         await db.runAsync(
-          `DELETE FROM exercise_completion_audits WHERE ${exerciseClause} AND scheduled_routine_id = ? AND meta_group_item_id = ?`,
+          `DELETE FROM exercise_completion_audits WHERE ${exerciseClause} AND scheduled_routine_id = ? AND COALESCE(meta_group_item_id, 0) = ?`,
           [exerciseKey, schedId, sessionItem.metaGroupItemId]
         );
       } else {
         await db.runAsync(
           `DELETE FROM exercise_completion_audits
-           WHERE ${exerciseClause} AND routine_id = ? AND completed_date = ? AND meta_group_item_id = ?
+           WHERE ${exerciseClause} AND routine_id = ? AND completed_date = ? AND COALESCE(meta_group_item_id, 0) = ?
              AND (scheduled_routine_id IS NULL OR scheduled_routine_id = 0)`,
           [exerciseKey, routineId, auditDate, sessionItem.metaGroupItemId]
         );
@@ -702,7 +895,7 @@ export default function WorkoutSessionScreen() {
 
   // Update specific set reps during session
   const handleUpdateReps = (setNum: number, newReps: number) => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
     const uniqueId = activeSessionItem.uniqueId;
     const updatedCustomReps = {
       ...customReps,
@@ -740,7 +933,7 @@ export default function WorkoutSessionScreen() {
 
   // Update specific set weight during session
   const handleUpdateWeight = (setNum: number, newWeight: number) => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
     const uniqueId = activeSessionItem.uniqueId;
     const updatedCustomWeights = {
       ...customWeights,
@@ -777,21 +970,38 @@ export default function WorkoutSessionScreen() {
     }
   };
 
-  // Cross-timer interval logic
+  // Cross-timer logic — anchored to a real timestamp (not a tick count) so elapsed time
+  // stays accurate even when the JS timer is suspended while the app is backgrounded.
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null;
-    if (isRunning) {
-      interval = setInterval(() => {
-        if (isResting) {
-          setRestSeconds((prev) => prev + 1);
-        } else {
-          setActiveSeconds((prev) => prev + 1);
-        }
-      }, 1000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
+    if (!isRunning) return;
+
+    timerAnchorRef.current = {
+      timestamp: Date.now(),
+      baseActive: activeSeconds,
+      baseRest: restSeconds,
     };
+
+    const tick = () => {
+      const anchor = timerAnchorRef.current;
+      if (!anchor) return;
+      const elapsed = Math.floor((Date.now() - anchor.timestamp) / 1000);
+      if (isResting) {
+        setRestSeconds(anchor.baseRest + elapsed);
+      } else {
+        setActiveSeconds(anchor.baseActive + elapsed);
+      }
+    };
+
+    const interval = setInterval(tick, 1000);
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') tick();
+    });
+
+    return () => {
+      clearInterval(interval);
+      appStateSub.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning, isResting]);
 
   // Format seconds to MM:SS
@@ -803,6 +1013,7 @@ export default function WorkoutSessionScreen() {
 
   // Toggle active stopwatch timer for current set (Work vs Pause)
   const handleToggleActiveTimer = () => {
+    if (isReviewMode) return;
     setIsRunning((prev) => !prev);
     
     saveProgress(
@@ -819,6 +1030,7 @@ export default function WorkoutSessionScreen() {
 
   // Finish current set, check it off, and trigger rest timer
   const handleFinishSet = () => {
+    if (isReviewMode) return;
     const nextCompletedSets = new Set(completedSets);
     nextCompletedSets.add(currentSet);
 
@@ -871,6 +1083,7 @@ export default function WorkoutSessionScreen() {
 
   // Start the next set, conmuting back to exercise execution
   const handleStartNextSet = () => {
+    if (isReviewMode) return;
     setIsResting(false);
     setIsRunning(true);
     setActiveSeconds(0);
@@ -889,12 +1102,13 @@ export default function WorkoutSessionScreen() {
 
   // Toggle absolute Pause/Resume
   const handlePlayPause = () => {
+    if (isReviewMode) return;
     setIsRunning((prev) => !prev);
   };
 
   // Custom reset logic
   const handleCustomReset = () => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
 
     // Reset timer metrics
     setActiveSeconds(0);
@@ -971,7 +1185,7 @@ export default function WorkoutSessionScreen() {
 
   // Finish active exercise and progress
   const handleFinishExercise = () => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
 
     // Pause timers
     setIsRunning(false);
@@ -1090,6 +1304,7 @@ export default function WorkoutSessionScreen() {
 
   // Check off or manually select a set
   const handleToggleSetManual = (setNum: number) => {
+    if (isReviewMode) return;
     const nextCompletedSets = new Set(completedSets);
     const nextSetTimes = { ...setTimes };
 
@@ -1164,7 +1379,7 @@ export default function WorkoutSessionScreen() {
 
   // Add an extra set to the current exercise during the session
   const handleAddExtraSet = () => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
     const uniqueId = activeSessionItem.uniqueId;
     const newExtras = { ...extraSetsPerExercise, [uniqueId]: (extraSetsPerExercise[uniqueId] || 0) + 1 };
     stateRef.current.extraSetsPerExercise = newExtras;
@@ -1177,7 +1392,7 @@ export default function WorkoutSessionScreen() {
 
   // Delete a set from the current exercise during the session
   const handleDeleteSet = (setNum: number) => {
-    if (!activeSessionItem) return;
+    if (isReviewMode || !activeSessionItem) return;
     const uniqueId = activeSessionItem.uniqueId;
 
     // Register the set as deleted
@@ -1244,6 +1459,7 @@ export default function WorkoutSessionScreen() {
 
   // Add an ad-hoc exercise to the current session (not part of the routine)
   const handleAddAdhocExercise = (exercise: Exercise) => {
+    if (isReviewMode) return;
     const ts = Date.now();
     const uniqueId = `adhoc-${ts}-${exercise.id}`;
     const newItem: SessionExercise = {
@@ -1313,10 +1529,12 @@ export default function WorkoutSessionScreen() {
             tintColor={theme.textSecondary}
           />
           <ThemedText style={styles.emptyTitle} type="smallBold">
-            Rutina sin ejercicios
+            {isReviewMode ? 'Sin registros' : 'Rutina sin ejercicios'}
           </ThemedText>
           <ThemedText style={styles.emptySubtitle} type="small" themeColor="textSecondary">
-            Esta rutina no tiene ejercicios asignados. Agrega grupos y ejercicios en el módulo de entrenamiento.
+            {isReviewMode
+              ? 'Esta sesión no tiene registros.'
+              : 'Esta rutina no tiene ejercicios asignados. Agrega grupos y ejercicios en el módulo de entrenamiento.'}
           </ThemedText>
           <Pressable
             onPress={() => router.back()}
@@ -1410,7 +1628,7 @@ export default function WorkoutSessionScreen() {
             </ThemedText>
             {formattedDate ? (
               <ThemedText type="code" themeColor="textSecondary">
-                {formattedDate} • {percentComplete}% completado
+                {formattedDate} • {percentComplete}% completado{isReviewMode ? ' • Modo revisión' : isContinueMode ? ' • Continuando' : ''}
               </ThemedText>
             ) : null}
           </View>
@@ -1440,30 +1658,34 @@ export default function WorkoutSessionScreen() {
               <ScrollView contentContainerStyle={styles.sidebarScroll}>
                 {sessionExercises.map((item, idx) => renderExerciseListItem(item, idx))}
               </ScrollView>
-              <Pressable
-                onPress={() => setIsAddExerciseOpen(true)}
-                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginBottom: 0 }, pressed && styles.pressed]}>
-                <SymbolView
-                  name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
-                  size={16}
-                  tintColor="#3c87f7"
-                />
-                <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
-                  Agregar ejercicio
-                </ThemedText>
-              </Pressable>
-              <Pressable
-                onPress={() => router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`)}
-                style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginTop: 0 }, pressed && styles.pressed]}>
-                <SymbolView
-                  name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
-                  size={16}
-                  tintColor="#ff9500"
-                />
-                <ThemedText type="small" style={{ color: '#ff9500', fontWeight: '600' }}>
-                  Editar rutina
-                </ThemedText>
-              </Pressable>
+              {!isReviewMode && (
+                <>
+                  <Pressable
+                    onPress={() => setIsAddExerciseOpen(true)}
+                    style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginBottom: 0 }, pressed && styles.pressed]}>
+                    <SymbolView
+                      name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                      size={16}
+                      tintColor="#3c87f7"
+                    />
+                    <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
+                      Agregar ejercicio
+                    </ThemedText>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`)}
+                    style={({ pressed }) => [styles.addExerciseBtn, { margin: Spacing.two, marginTop: 0 }, pressed && styles.pressed]}>
+                    <SymbolView
+                      name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
+                      size={16}
+                      tintColor="#ff9500"
+                    />
+                    <ThemedText type="small" style={{ color: '#ff9500', fontWeight: '600' }}>
+                      Editar rutina
+                    </ThemedText>
+                  </Pressable>
+                </>
+              )}
             </ThemedView>
           )}
 
@@ -1475,6 +1697,20 @@ export default function WorkoutSessionScreen() {
             
             {activeExercise && (
               <View style={styles.activeContainer}>
+                {isContinueMode && (
+                  <ThemedView
+                    type="backgroundElement"
+                    style={[styles.statusBanner, { backgroundColor: 'rgba(60, 135, 247, 0.12)' }]}>
+                    <SymbolView
+                      name={{ ios: 'info.circle.fill', android: 'info', web: 'info' }}
+                      size={18}
+                      tintColor="#3c87f7"
+                    />
+                    <ThemedText type="small" style={{ color: '#3c87f7', flex: 1 }}>
+                      Los ejercicios ya registrados aparecen marcados. Completa solo los nuevos.
+                    </ThemedText>
+                  </ThemedView>
+                )}
                 {/* Exercise Info Card */}
                 <ThemedView type="backgroundElement" style={styles.exerciseCard}>
                   <View style={styles.cardHeader}>
@@ -1557,6 +1793,7 @@ export default function WorkoutSessionScreen() {
                 </ThemedView>
 
                 {/* Double Timers Component */}
+                {!isReviewMode && (
                 <View style={styles.timersContainer}>
                   <ThemedView
                     type="backgroundElement"
@@ -1612,22 +1849,25 @@ export default function WorkoutSessionScreen() {
                     </View>
                   </ThemedView>
                 </View>
+                )}
 
                 {/* Status Bar */}
                 <ThemedView type="backgroundElement" style={styles.statusBanner}>
                   <SymbolView
                     name={
-                      isAllSetsCompleted
+                      isReviewMode || isAllSetsCompleted
                         ? { ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' }
                         : isResting
                         ? { ios: 'hourglass', android: 'hourglass_empty', web: 'hourglass_empty' }
                         : { ios: 'figure.strengthtraining.traditional', android: 'fitness_center', web: 'fitness_center' }
                     }
                     size={18}
-                    tintColor={isAllSetsCompleted ? '#34c759' : isResting ? '#ff9500' : '#3c87f7'}
+                    tintColor={isReviewMode || isAllSetsCompleted ? '#34c759' : isResting ? '#ff9500' : '#3c87f7'}
                   />
-                  <ThemedText type="smallBold" style={{ color: isAllSetsCompleted ? '#34c759' : isResting ? '#ff9500' : '#3c87f7' }}>
-                    {isAllSetsCompleted
+                  <ThemedText type="smallBold" style={{ color: isReviewMode || isAllSetsCompleted ? '#34c759' : isResting ? '#ff9500' : '#3c87f7' }}>
+                    {isReviewMode
+                      ? 'ESTADO: SESIÓN COMPLETADA (REVISIÓN)'
+                      : isAllSetsCompleted
                       ? 'ESTADO: EJERCICIO COMPLETADO'
                       : isResting
                       ? 'ESTADO: DESCANSO ACTIVO'
@@ -1697,6 +1937,7 @@ export default function WorkoutSessionScreen() {
                                 return (
                                   <View style={styles.repsCounterContainer}>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={(e) => {
                                         e.stopPropagation();
                                         handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1));
@@ -1711,6 +1952,7 @@ export default function WorkoutSessionScreen() {
                                       {currentRepsValue}
                                     </ThemedText>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={(e) => {
                                         e.stopPropagation();
                                         handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1));
@@ -1732,6 +1974,7 @@ export default function WorkoutSessionScreen() {
                                 return (
                                   <View style={styles.repsCounterContainer}>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={(e) => {
                                         e.stopPropagation();
                                         handleUpdateWeight(setNum, Math.max(0, currentWeightValue - 1));
@@ -1746,6 +1989,7 @@ export default function WorkoutSessionScreen() {
                                       {currentWeightValue}
                                     </ThemedText>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={(e) => {
                                         e.stopPropagation();
                                         handleUpdateWeight(setNum, Math.min(1000, currentWeightValue + 1));
@@ -1774,15 +2018,17 @@ export default function WorkoutSessionScreen() {
                                   </ThemedText>
                                 </View>
                               )}
-                              <Pressable
-                                onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
-                                style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
-                                <SymbolView
-                                  name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
-                                  size={14}
-                                  tintColor="#ff453a"
-                                />
-                              </Pressable>
+                              {!isReviewMode && (
+                                <Pressable
+                                  onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
+                                  style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
+                                  <SymbolView
+                                    name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
+                                    size={14}
+                                    tintColor="#ff453a"
+                                  />
+                                </Pressable>
+                              )}
                             </View>
                           </Pressable>
                         );
@@ -1849,15 +2095,17 @@ export default function WorkoutSessionScreen() {
                                   </ThemedText>
                                 </View>
                               )}
-                              <Pressable
-                                onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
-                                style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
-                                <SymbolView
-                                  name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
-                                  size={16}
-                                  tintColor="#ff453a"
-                                />
-                              </Pressable>
+                              {!isReviewMode && (
+                                <Pressable
+                                  onPress={(e) => { e.stopPropagation(); handleDeleteSet(setNum); }}
+                                  style={({ pressed }) => [styles.deleteSetBtn, pressed && { opacity: 0.5 }]}>
+                                  <SymbolView
+                                    name={{ ios: 'trash', android: 'delete_outline', web: 'delete_outline' }}
+                                    size={16}
+                                    tintColor="#ff453a"
+                                  />
+                                </Pressable>
+                              )}
                               <SymbolView
                                 name={
                                   isExpanded
@@ -1881,6 +2129,7 @@ export default function WorkoutSessionScreen() {
                                   </ThemedText>
                                   <View style={styles.repsCounterContainer}>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={() => handleUpdateReps(setNum, Math.max(1, currentRepsValue - 1))}
                                       style={({ pressed }) => [
                                         styles.repsCounterBtnLarge,
@@ -1892,6 +2141,7 @@ export default function WorkoutSessionScreen() {
                                       {currentRepsValue}
                                     </ThemedText>
                                     <Pressable
+                                      disabled={isReviewMode}
                                       onPress={() => handleUpdateReps(setNum, Math.min(150, currentRepsValue + 1))}
                                       style={({ pressed }) => [
                                         styles.repsCounterBtnLarge,
@@ -1915,6 +2165,7 @@ export default function WorkoutSessionScreen() {
                                     </View>
                                     <View style={styles.repsCounterContainer}>
                                       <Pressable
+                                        disabled={isReviewMode}
                                         onPress={() => handleUpdateWeight(setNum, Math.max(0, currentWeightValue - 1))}
                                         style={({ pressed }) => [
                                           styles.repsCounterBtnLarge,
@@ -1926,6 +2177,7 @@ export default function WorkoutSessionScreen() {
                                         {currentWeightValue}
                                       </ThemedText>
                                       <Pressable
+                                        disabled={isReviewMode}
                                         onPress={() => handleUpdateWeight(setNum, Math.min(1000, currentWeightValue + 1))}
                                         style={({ pressed }) => [
                                           styles.repsCounterBtnLarge,
@@ -1945,21 +2197,24 @@ export default function WorkoutSessionScreen() {
                   </View>
 
                   {/* Add extra set button */}
-                  <Pressable
-                    onPress={handleAddExtraSet}
-                    style={({ pressed }) => [styles.addExtraSetBtn, pressed && styles.pressed]}>
-                    <SymbolView
-                      name={{ ios: 'plus.circle', android: 'add_circle_outline', web: 'add_circle_outline' }}
-                      size={16}
-                      tintColor="#3c87f7"
-                    />
-                    <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
-                      Agregar Serie
-                    </ThemedText>
-                  </Pressable>
+                  {!isReviewMode && (
+                    <Pressable
+                      onPress={handleAddExtraSet}
+                      style={({ pressed }) => [styles.addExtraSetBtn, pressed && styles.pressed]}>
+                      <SymbolView
+                        name={{ ios: 'plus.circle', android: 'add_circle_outline', web: 'add_circle_outline' }}
+                        size={16}
+                        tintColor="#3c87f7"
+                      />
+                      <ThemedText type="small" style={{ color: '#3c87f7', fontWeight: '600' }}>
+                        Agregar Serie
+                      </ThemedText>
+                    </Pressable>
+                  )}
                 </ThemedView>
 
                 {/* Ergonomic Main Action Toggler (Work / Rest) */}
+                {!isReviewMode && (
                 <View style={styles.primaryActions}>
                   {(() => {
                     if (isAllSetsCompleted) {
@@ -2071,8 +2326,10 @@ export default function WorkoutSessionScreen() {
                     );
                   })()}
                 </View>
+                )}
 
                 {/* Utility Control Panel */}
+                {!isReviewMode && (
                 <View style={styles.utilityControls}>
                   <Pressable
                     disabled={isAllSetsCompleted}
@@ -2132,9 +2389,10 @@ export default function WorkoutSessionScreen() {
                     </ThemedText>
                   </Pressable>
                 </View>
+                )}
 
                 {/* Collapsible Reset Settings panel */}
-                {showResetOptions && (
+                {!isReviewMode && showResetOptions && (
                   <ThemedView type="backgroundElement" style={styles.resetOptionsCard}>
                     <ThemedText type="smallBold" style={{ marginBottom: Spacing.two }}>
                       Configuración de Reinicio
@@ -2282,33 +2540,37 @@ export default function WorkoutSessionScreen() {
               <ScrollView contentContainerStyle={styles.drawerScroll}>
                 {sessionExercises.map((item, idx) => renderExerciseListItem(item, idx))}
               </ScrollView>
-              <Pressable
-                onPress={() => setIsAddExerciseOpen(true)}
-                style={({ pressed }) => [styles.addExerciseBtn, pressed && styles.pressed]}>
-                <SymbolView
-                  name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
-                  size={18}
-                  tintColor="#3c87f7"
-                />
-                <ThemedText type="smallBold" style={{ color: '#3c87f7' }}>
-                  Agregar ejercicio a la sesión
-                </ThemedText>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  setIsExerciseListOpen(false);
-                  router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`);
-                }}
-                style={({ pressed }) => [styles.addExerciseBtn, { borderTopWidth: 0 }, pressed && styles.pressed]}>
-                <SymbolView
-                  name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
-                  size={18}
-                  tintColor="#ff9500"
-                />
-                <ThemedText type="smallBold" style={{ color: '#ff9500' }}>
-                  Editar rutina
-                </ThemedText>
-              </Pressable>
+              {!isReviewMode && (
+                <>
+                  <Pressable
+                    onPress={() => setIsAddExerciseOpen(true)}
+                    style={({ pressed }) => [styles.addExerciseBtn, pressed && styles.pressed]}>
+                    <SymbolView
+                      name={{ ios: 'plus.circle.fill', android: 'add_circle', web: 'add_circle' }}
+                      size={18}
+                      tintColor="#3c87f7"
+                    />
+                    <ThemedText type="smallBold" style={{ color: '#3c87f7' }}>
+                      Agregar ejercicio a la sesión
+                    </ThemedText>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setIsExerciseListOpen(false);
+                      router.push(`/(tabs)/workout?tab=routines&expandId=${metaGroupId}`);
+                    }}
+                    style={({ pressed }) => [styles.addExerciseBtn, { borderTopWidth: 0 }, pressed && styles.pressed]}>
+                    <SymbolView
+                      name={{ ios: 'pencil.circle.fill', android: 'edit', web: 'edit' }}
+                      size={18}
+                      tintColor="#ff9500"
+                    />
+                    <ThemedText type="smallBold" style={{ color: '#ff9500' }}>
+                      Editar rutina
+                    </ThemedText>
+                  </Pressable>
+                </>
+              )}
             </ThemedView>
           </View>
         </Modal>
